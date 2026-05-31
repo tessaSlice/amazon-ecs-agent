@@ -941,24 +941,26 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 			}
 		}
 		// Attach dummy GPU utilization metric to GeneralMetricsPayload.
-		// This is a placeholder for future DCGM-based GPU telemetry.
-		containerMetric.GeneralMetricsPayload = getDummyGPUMetrics()
-		seelog.Infof("Attached dummy GPU metrics to container %s in task %s",
-			container.containerMetadata.Name, taskArn)
+		// Use real GPU IDs from the container if available.
+		if resolvedContainer, err := engine.resolver.ResolveContainer(dockerID); err == nil {
+			gpuIDs := resolvedContainer.Container.GPUIDs
+			if len(gpuIDs) > 0 {
+				containerMetric.GeneralMetricsPayload = getDummyGPUMetricsForDevices(gpuIDs)
+				seelog.Infof("Attached dummy GPU metrics (devices=%v) to container %s in task %s",
+					gpuIDs, container.containerMetadata.Name, taskArn)
+			}
+		}
 
 		containerMetrics = append(containerMetrics, containerMetric)
 	}
 	return containerMetrics, nil
 }
 
-// getDummyGPUMetrics returns a GeneralMetricsPayload with all GPU metrics that
-// Two emits, filled with arbitrary values. This includes per-device metrics
-// (GPUUtilization, GPUMemoryUtilization, GPUMemoryTotal, GPUMemoryUsed,
-// GPUPowerDraw, GPUTemperature, GPURestartAppXidCount) for two fake GPU devices.
-func getDummyGPUMetrics() []*ecstcs.GeneralMetricsWrapper {
+// getDummyGPUMetricsForDevices returns a GeneralMetricsPayload with GPU metrics
+// for the given device UUIDs, filled with arbitrary values.
+func getDummyGPUMetricsForDevices(gpuIDs []string) []*ecstcs.GeneralMetricsWrapper {
 	dimensionKey := "AcceleratedDevice"
 
-	// Metric name constants matching Two's gpu_metrics_conversion.go
 	nameGPUUtilization := "GPUUtilization"
 	nameGPUMemoryUtilization := "GPUMemoryUtilization"
 	nameGPUMemoryTotal := "GPUMemoryTotal"
@@ -967,73 +969,48 @@ func getDummyGPUMetrics() []*ecstcs.GeneralMetricsWrapper {
 	nameGPUTemperature := "GPUTemperature"
 	nameGPURestartAppXidCount := "GPURestartAppXidCount"
 
-	// Unit constants matching Two's gpu_metrics_conversion.go
 	unitPercent := "Percent"
 	unitBytes := "Bytes"
 	unitNone := "None"
 	unitCount := "Count"
 
-	// Arbitrary values for two fake GPU devices
-	gpu0UUID := "GPU-00000000-1111-2222-3333-444444444444"
-	gpu1UUID := "GPU-55555555-6666-7777-8888-999999999999"
+	var wrappers []*ecstcs.GeneralMetricsWrapper
+	for _, gpuID := range gpuIDs {
+		id := gpuID
+		util := float64(73.5)
+		memUtil := float64(45.2)
+		memTotal := int64(16106127360) // ~15 GiB (T4)
+		memUsed := int64(7247757312)   // ~6.75 GiB
+		power := float64(55.0)
+		temp := float64(42.0)
+		xidCount := int64(0)
 
-	gpu0Util := float64(73.5)
-	gpu0MemUtil := float64(45.2)
-	gpu0MemTotal := int64(85899345920) // ~80 GiB
-	gpu0MemUsed := int64(38654705664)  // ~36 GiB
-	gpu0Power := float64(285.0)
-	gpu0Temp := float64(67.0)
-	gpu0XidCount := int64(0)
-
-	gpu1Util := float64(91.2)
-	gpu1MemUtil := float64(82.7)
-	gpu1MemTotal := int64(85899345920) // ~80 GiB
-	gpu1MemUsed := int64(71039262720)  // ~66 GiB
-	gpu1Power := float64(342.5)
-	gpu1Temp := float64(74.0)
-	gpu1XidCount := int64(2)
-
-	return []*ecstcs.GeneralMetricsWrapper{
-		{
+		wrappers = append(wrappers, &ecstcs.GeneralMetricsWrapper{
 			Dimensions: []*ecstcs.Dimension{
-				{Key: &dimensionKey, Value: &gpu0UUID},
+				{Key: &dimensionKey, Value: &id},
 			},
 			GeneralMetrics: []*ecstcs.GeneralMetric{
-				{MetricName: &nameGPUUtilization, MetricValueDouble: &gpu0Util, Unit: &unitPercent},
-				{MetricName: &nameGPUMemoryUtilization, MetricValueDouble: &gpu0MemUtil, Unit: &unitPercent},
-				{MetricName: &nameGPUMemoryTotal, MetricValueLong: &gpu0MemTotal, Unit: &unitBytes},
-				{MetricName: &nameGPUMemoryUsed, MetricValueLong: &gpu0MemUsed, Unit: &unitBytes},
-				{MetricName: &nameGPUPowerDraw, MetricValueDouble: &gpu0Power, Unit: &unitNone},
-				{MetricName: &nameGPUTemperature, MetricValueDouble: &gpu0Temp, Unit: &unitNone},
-				{MetricName: &nameGPURestartAppXidCount, MetricValueLong: &gpu0XidCount, Unit: &unitCount},
+				{MetricName: &nameGPUUtilization, MetricValueDouble: &util, Unit: &unitPercent},
+				{MetricName: &nameGPUMemoryUtilization, MetricValueDouble: &memUtil, Unit: &unitPercent},
+				{MetricName: &nameGPUMemoryTotal, MetricValueLong: &memTotal, Unit: &unitBytes},
+				{MetricName: &nameGPUMemoryUsed, MetricValueLong: &memUsed, Unit: &unitBytes},
+				{MetricName: &nameGPUPowerDraw, MetricValueDouble: &power, Unit: &unitNone},
+				{MetricName: &nameGPUTemperature, MetricValueDouble: &temp, Unit: &unitNone},
+				{MetricName: &nameGPURestartAppXidCount, MetricValueLong: &xidCount, Unit: &unitCount},
 			},
-		},
-		{
-			Dimensions: []*ecstcs.Dimension{
-				{Key: &dimensionKey, Value: &gpu1UUID},
-			},
-			GeneralMetrics: []*ecstcs.GeneralMetric{
-				{MetricName: &nameGPUUtilization, MetricValueDouble: &gpu1Util, Unit: &unitPercent},
-				{MetricName: &nameGPUMemoryUtilization, MetricValueDouble: &gpu1MemUtil, Unit: &unitPercent},
-				{MetricName: &nameGPUMemoryTotal, MetricValueLong: &gpu1MemTotal, Unit: &unitBytes},
-				{MetricName: &nameGPUMemoryUsed, MetricValueLong: &gpu1MemUsed, Unit: &unitBytes},
-				{MetricName: &nameGPUPowerDraw, MetricValueDouble: &gpu1Power, Unit: &unitNone},
-				{MetricName: &nameGPUTemperature, MetricValueDouble: &gpu1Temp, Unit: &unitNone},
-				{MetricName: &nameGPURestartAppXidCount, MetricValueLong: &gpu1XidCount, Unit: &unitCount},
-			},
-		},
+		})
 	}
+	return wrappers
 }
 
-// getDummyInstanceGPUMetrics returns instance-level GPU metrics matching Two's format.
-// This includes InstanceGPULimit (total GPUs on instance) and InstanceGPUUsageTotal
-// (GPUs assigned to running task containers).
+// getDummyInstanceGPUMetrics returns instance-level GPU metrics (no dimensions,
+// so they pass through the TACS DimensionSet filter unconditionally).
 func getDummyInstanceGPUMetrics() *ecstcs.InstanceMetrics {
 	nameInstanceGPULimit := "InstanceGPULimit"
 	nameInstanceGPUUsageTotal := "InstanceGPUUsageTotal"
 	unitCount := "Count"
 
-	gpuLimit := int64(2)
+	gpuLimit := int64(4)
 	gpuUsageTotal := int64(1)
 
 	return &ecstcs.InstanceMetrics{
