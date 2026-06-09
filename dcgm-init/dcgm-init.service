@@ -1,0 +1,14 @@
+[Unit]
+Description=DCGM GPU Metrics Collector for ECS
+After=nvidia-dcgm.service docker.service
+Wants=nvidia-dcgm.service
+ConditionPathExists=/dev/nvidia0
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/dcgm-init
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

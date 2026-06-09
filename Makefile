@@ -357,6 +357,20 @@ start-ebs-csi-driver: ebs-csi-driver
 stop-ebs-csi-driver:
 	ps aux | grep $(EBS_CSI_DRIVER_DIR)/bin/ebs-csi-driver | grep -v grep | awk '{print $$2}' | xargs -L1 kill
 
+# dcgm-init: standalone GPU metrics collector daemon.
+# Connects to nv-hostengine via go-dcgm, writes metrics to a Unix socket for the agent.
+DCGM_INIT_DIR=./dcgm-init
+
+dcgm-init:
+	cd $(DCGM_INIT_DIR) && CGO_ENABLED=1 CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' \
+		go build -o bin/dcgm-init .
+
+# This is used to build dcgm-init during ECS Init RPM builds via CodeBuild.
+# Unlike EBS CSI driver (container image tar), dcgm-init is a host binary.
+dcgm-init-codebuild: dcgm-init
+	cp $(DCGM_INIT_DIR)/bin/dcgm-init dcgm-init-v${VERSION}
+	cp $(DCGM_INIT_DIR)/bin/dcgm-init dcgm-init-arm64-v${VERSION}
+
 image-cleanup-test-images:
 	$(MAKE) -C misc/image-cleanup-test-images $(MFLAGS)
 

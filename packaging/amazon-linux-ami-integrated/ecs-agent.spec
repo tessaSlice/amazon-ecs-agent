@@ -41,6 +41,9 @@ Source4:        amazon-ecs-volume-plugin.socket
 Source5:        amazon-ecs-volume-plugin.conf
 Source6:        ebs-csi-driver-arm64-v%{version}.tar
 Source7:        ebs-csi-driver-v%{version}.tar
+Source8:        dcgm-init-arm64-v%{version}
+Source9:        dcgm-init-v%{version}
+Source10:       dcgm-init.service
 
 BuildRequires:  golang >= 1.25.0
 %if %{with systemd}
@@ -292,6 +295,14 @@ install -m %{no_exec_perm} -D %{SOURCE6} %{buildroot}%{ebs_csi_driver_dir}/ebs-c
 install -m %{no_exec_perm} -D %{SOURCE7} %{buildroot}%{ebs_csi_driver_dir}/ebs-csi-driver.tar
 %endif
 
+# Install dcgm-init binary (GPU metrics collector daemon)
+%ifarch aarch64
+install -D %{SOURCE8} %{buildroot}%{_libexecdir}/dcgm-init
+%else
+install -D %{SOURCE9} %{buildroot}%{_libexecdir}/dcgm-init
+%endif
+install -m %{no_exec_perm} -D %{SOURCE10} $RPM_BUILD_ROOT/%{_unitdir}/dcgm-init.service
+
 # Configure ecs-init to reload the bundled ECS container agent image.
 mkdir -p %{buildroot}%{_cachedir}/ecs
 echo 2 > %{buildroot}%{_cachedir}/ecs/state
@@ -321,11 +332,13 @@ install -m %{no_exec_perm} -D %{SOURCE5} %{buildroot}%{_sysconfdir}/init/amazon-
 %dir %{_sharedstatedir}/ecs/data
 %dir %{ebs_csi_driver_dir}
 %{ebs_csi_driver_dir}/ebs-csi-driver.tar
+%{_libexecdir}/dcgm-init
 
 %if %{with systemd}
 %{_unitdir}/ecs.service
 %{_unitdir}/amazon-ecs-volume-plugin.service
 %{_unitdir}/amazon-ecs-volume-plugin.socket
+%{_unitdir}/dcgm-init.service
 %else
 %{_sysconfdir}/init/ecs.conf
 %{_sysconfdir}/init/amazon-ecs-volume-plugin.conf
