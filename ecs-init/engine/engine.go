@@ -230,6 +230,8 @@ func (e *Engine) PreStartGPU() error {
 				log.Errorf("Nvidia GPU Manager: %v", err)
 				return engineError("Nvidia GPU Manager", err)
 			}
+			// Start DCGM metrics collector in background.
+			startDCGMCollector()
 		}
 	}
 	return nil

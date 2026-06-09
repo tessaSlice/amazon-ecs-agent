@@ -14,11 +14,13 @@
 package main
 
 import (
+	"context"
 	"math/rand"
 	"os"
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/app"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 )
 
@@ -28,5 +30,11 @@ func init() {
 
 func main() {
 	logger.InitSeelog()
+
+	// Start GPU metrics socket listener (receives metrics from ecs-init's DCGM collector)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gpu.StartGPUMetricsListener(ctx)
+
 	os.Exit(app.Run(os.Args[1:]))
 }
