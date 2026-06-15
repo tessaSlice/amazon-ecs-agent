@@ -275,10 +275,12 @@ required routes among its preparation steps.
 # each of these should build for arm and amd arch
 make release-agent-internal
 ./scripts/gobuild.sh %{gobuild_tag}
+make build-dcgm-init
 
 %install
 install -D amazon-ecs-init %{buildroot}%{_libexecdir}/amazon-ecs-init
 install -D amazon-ecs-volume-plugin %{buildroot}%{_libexecdir}/amazon-ecs-volume-plugin
+install -D dcgm-init-bin %{buildroot}%{_libexecdir}/dcgm-init
 install -m %{no_exec_perm} -D scripts/amazon-ecs-init.1 %{buildroot}%{_mandir}/man1/amazon-ecs-init.1
 
 mkdir -p %{buildroot}%{_sysconfdir}/ecs
@@ -312,6 +314,7 @@ install -m %{no_exec_perm} -D %{SOURCE5} %{buildroot}%{_sysconfdir}/init/amazon-
 %{_libexecdir}/amazon-ecs-init
 %{_mandir}/man1/amazon-ecs-init.1*
 %{_libexecdir}/amazon-ecs-volume-plugin
+%{_libexecdir}/dcgm-init
 %dir %{_sysconfdir}/ecs
 %config(noreplace) %ghost %{_sysconfdir}/ecs/ecs.config
 %config(noreplace) %ghost %{_sysconfdir}/ecs/ecs.config.json

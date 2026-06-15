@@ -29,6 +29,7 @@ Source0:        sources.tgz
 Source1:        ecs.service
 Source2:        amazon-ecs-volume-plugin.service
 Source3:        amazon-ecs-volume-plugin.socket
+Source4:        dcgm-init.service
 
 BuildRequires:  systemd
 Requires:       systemd
@@ -46,10 +47,12 @@ required routes among its preparation steps.
 %build
 make release-agent
 ./scripts/gobuild.sh %{gobuild_tag}
+make build-dcgm-init
 
 %install
 install -D amazon-ecs-init %{buildroot}%{_libexecdir}/amazon-ecs-init
 install -D amazon-ecs-volume-plugin %{buildroot}%{_libexecdir}/amazon-ecs-volume-plugin
+install -D dcgm-init-bin %{buildroot}%{_libexecdir}/dcgm-init
 install -m %{no_exec_perm} -D scripts/amazon-ecs-init.1 %{buildroot}%{_mandir}/man1/amazon-ecs-init.1
 
 mkdir -p %{buildroot}%{_sysconfdir}/ecs
@@ -66,11 +69,13 @@ mkdir -p %{buildroot}%{_sharedstatedir}/ecs/data
 install -m %{no_exec_perm} -D %{SOURCE1} $RPM_BUILD_ROOT/%{_unitdir}/ecs.service
 install -m %{no_exec_perm} -D %{SOURCE2} $RPM_BUILD_ROOT/%{_unitdir}/amazon-ecs-volume-plugin.service
 install -m %{no_exec_perm} -D %{SOURCE3} $RPM_BUILD_ROOT/%{_unitdir}/amazon-ecs-volume-plugin.socket
+install -m %{no_exec_perm} -D %{SOURCE4} $RPM_BUILD_ROOT/%{_unitdir}/dcgm-init.service
 
 %files
 %{_libexecdir}/amazon-ecs-init
 %{_mandir}/man1/amazon-ecs-init.1*
 %{_libexecdir}/amazon-ecs-volume-plugin
+%{_libexecdir}/dcgm-init
 %dir %{_sysconfdir}/ecs
 %config(noreplace) %ghost %{_sysconfdir}/ecs/ecs.config
 %config(noreplace) %ghost %{_sysconfdir}/ecs/ecs.config.json
@@ -81,16 +86,19 @@ install -m %{no_exec_perm} -D %{SOURCE3} $RPM_BUILD_ROOT/%{_unitdir}/amazon-ecs-
 %{_unitdir}/ecs.service
 %{_unitdir}/amazon-ecs-volume-plugin.service
 %{_unitdir}/amazon-ecs-volume-plugin.socket
+%{_unitdir}/dcgm-init.service
 
 %post
 # Symlink the bundled ECS Agent at loadable path.
 ln -sf %{basename:%{agent_image}} %{_cachedir}/ecs/ecs-agent.tar
 %systemd_post ecs
 %systemd_post amazon-ecs-volume-plugin.service
+%systemd_post dcgm-init.service
 
 %postun
 %systemd_postun ecs.service
 %systemd_postun_with_restart amazon-ecs-volume-plugin
+%systemd_postun_with_restart dcgm-init
 
 %changelog
 * Tue May 19 2026 amazon-ecs-bot <amazon-ecs-bot@amazon.com> - 1.103.2-1
