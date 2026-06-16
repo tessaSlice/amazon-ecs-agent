@@ -1,0 +1,14 @@
+[Unit]
+Description=Amazon ECS DCGM GPU Metrics Collector
+Documentation=https://github.com/aws/amazon-ecs-agent
+After=network.target docker.service
+ConditionPathExists=/dev/nvidia0
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/dcgm-init --interval 10s --output /var/run/ecs/gpu-metrics.json
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

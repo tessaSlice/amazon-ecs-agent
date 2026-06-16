@@ -191,6 +191,16 @@ test-init:
 		./... && cd ..
 	cd ecs-init && go tool cover -func ../cover.out > ../coverprofile-init.out && cd ..
 
+# dcgm-init targets
+.PHONY: build-dcgm-init test-dcgm-init
+build-dcgm-init:
+	cd dcgm-init && CGO_ENABLED=1 CGO_LDFLAGS="-Wl,--unresolved-symbols=ignore-in-object-files" \
+		go build -mod=vendor -ldflags "-s" -o ../amazon-dcgm-init .
+
+test-dcgm-init:
+	cd dcgm-init && CGO_ENABLED=1 CGO_LDFLAGS="-Wl,--unresolved-symbols=ignore-in-object-files" \
+		go test -mod=vendor -v -tags unit -count=1 -timeout=60s ./...
+
 test-silent: test-ebs-csi
 	cd agent && GO111MODULE=on ${GOTEST} -tags unit -mod vendor \
 		-coverprofile ../cover.out \
@@ -417,6 +427,7 @@ gomod:
 	cd ./ecs-agent && go mod tidy && go mod vendor
 	cd ./agent && go mod tidy && go mod vendor
 	cd ./ecs-init && go mod tidy && go mod vendor
+	cd ./dcgm-init && go mod tidy && go mod vendor
 
 GOPATH=$(shell go env GOPATH)
 
@@ -446,7 +457,7 @@ amazon-linux-sources.tgz:
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.conf amazon-ecs-volume-plugin.conf
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.service amazon-ecs-volume-plugin.service
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.socket amazon-ecs-volume-plugin.socket
-	tar -czf ./sources.tgz ecs-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION RELEASE_COMMIT
+	tar -czf ./sources.tgz ecs-init dcgm-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION RELEASE_COMMIT
 
 .amazon-linux-rpm-integrated-done: amazon-linux-sources.tgz
 	test -e SOURCES || ln -s . SOURCES
@@ -465,7 +476,7 @@ amazon-linux-rpm-integrated: .amazon-linux-rpm-integrated-done
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.conf amazon-ecs-volume-plugin.conf
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.service amazon-ecs-volume-plugin.service
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.socket amazon-ecs-volume-plugin.socket
-	tar -czf ./sources.tgz ecs-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
+	tar -czf ./sources.tgz ecs-init dcgm-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
 	test -e SOURCES || ln -s . SOURCES
 	rpmbuild --define "%_topdir $(PWD)" -bb ecs-agent.spec
 	find RPMS/ -type f -exec cp {} . \;
@@ -479,7 +490,7 @@ amazon-linux-rpm-codebuild: .amazon-linux-rpm-codebuild-done
 	cp packaging/generic-rpm-integrated/ecs.service ecs.service
 	cp packaging/generic-rpm-integrated/amazon-ecs-volume-plugin.service amazon-ecs-volume-plugin.service
 	cp packaging/generic-rpm-integrated/amazon-ecs-volume-plugin.socket amazon-ecs-volume-plugin.socket
-	tar -czf ./sources.tgz ecs-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
+	tar -czf ./sources.tgz ecs-init dcgm-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
 	test -e SOURCES || ln -s . SOURCES
 	rpmbuild --define "%_topdir $(PWD)" -bb amazon-ecs-init.spec
 	find RPMS/ -type f -exec cp {} . \;
@@ -491,8 +502,8 @@ generic-rpm-integrated: .generic-rpm-integrated-done
 .generic-deb-integrated-done: get-cni-sources
 	./scripts/update-version.sh
 	mkdir -p BUILDROOT
-	tar -czf ./amazon-ecs-init_${VERSION}.orig.tar.gz ecs-init scripts README.md
-	cp -r packaging/generic-deb-integrated/debian Makefile ecs-init scripts misc agent agent-container amazon-ecs-cni-plugins amazon-vpc-cni-plugins README.md VERSION GO_VERSION BUILDROOT
+	tar -czf ./amazon-ecs-init_${VERSION}.orig.tar.gz ecs-init dcgm-init scripts README.md
+	cp -r packaging/generic-deb-integrated/debian Makefile ecs-init dcgm-init scripts misc agent agent-container amazon-ecs-cni-plugins amazon-vpc-cni-plugins README.md VERSION GO_VERSION BUILDROOT
 	cd BUILDROOT && dpkg-buildpackage -uc -b
 	touch .generic-deb-integrated-done
 
@@ -537,6 +548,7 @@ clean:
 	-rm -rf ./bin
 	-rm -f ./sources.tgz
 	-rm -f ./amazon-ecs-init
+	-rm -f ./amazon-dcgm-init
 	-rm -f ./ecs-init/ecs-init
 	-rm -f ./amazon-ecs-init-*.rpm
 	-rm -f ./ecs-agent-*.tar
