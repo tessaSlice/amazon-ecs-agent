@@ -47,4 +47,3 @@ ecs-agent-*.tar
 pkg/
 .vscode/
 .kiro/
-!.kiro/steering/scripts/test-dcgm-init-e2e.sh
