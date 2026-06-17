@@ -357,6 +357,18 @@ func (agent *ecsAgent) doStart(containerChangeEventStream *eventstream.EventStre
 	imageManager engine.ImageManager,
 	client ecs.ECSClient,
 	execCmdMgr execcmd.Manager) int {
+	// Check for cloud-init failure before proceeding with startup.
+	// If cloud-init fell back to DataSourceNone but userdata exists on IMDS,
+	// userdata was not executed and the agent may have incorrect config.
+	if !agent.cfg.External.Enabled() {
+		if err := config.CheckCloudInitFailure(agent.ec2MetadataClient, config.CloudInitResultFilePath); err != nil {
+			seelog.Criticalf("Cloud-init failure detected: %v. "+
+				"Userdata was not executed during instance boot. "+
+				"Refusing to start with potentially incorrect config.", err)
+			return exitcodes.ExitTerminal
+		}
+	}
+
 	// check docker version >= 1.9.0, exit agent if older
 	if exitcode, ok := agent.verifyRequiredDockerVersion(); !ok {
 		return exitcode
@@ -971,8 +983,8 @@ func (agent *ecsAgent) startAsyncRoutines(
 		go agent.startSpotInstanceDrainingPoller(agent.ctx, client)
 	}
 
-	// Start IMDS credential refresher for periodic task credential retrieval via IMDS.
-	if imdsRefresher := agent.getIMDSCredentialRefresher(credentialsManager, taskEngine); imdsRefresher != nil {
+	// Start IMDS credentials refresher for periodic task credential retrieval via IMDS.
+	if imdsRefresher := agent.getIMDSCredentialsRefresher(credentialsManager, taskEngine); imdsRefresher != nil {
 		go imdsRefresher.Start()
 	}
 
@@ -1027,15 +1039,17 @@ func (agent *ecsAgent) startSpotInstanceDrainingPoller(ctx context.Context, clie
 	}
 }
 
-// getIMDSCredentialRefresher returns an IMDS credential refresher
+// getIMDSCredentialsRefresher returns an IMDS credentials refresher
 // if the IMDSIAMRolesEnabled configuration is enabled.
-func (agent *ecsAgent) getIMDSCredentialRefresher(
+func (agent *ecsAgent) getIMDSCredentialsRefresher(
 	credentialsManager credentials.Manager,
 	taskEngine engine.TaskEngine,
-) *imdscreds.IMDSCredentialRefresher {
+) *imdscreds.IMDSCredentialsRefresher {
 	if agent.cfg.IMDSIAMRolesEnabled {
-		imdsScanner := imds.NewScanner(agent.ec2MetadataClient)
-		return imdscreds.NewIMDSCredentialRefresher(
+		// The agent passes a no-op metrics factory; scanner-emitted metrics,
+		// like other agent runtime metrics, are not consumed today.
+		imdsScanner := imds.NewScanner(agent.ec2MetadataClient, metricsfactory.NewNopEntryFactory())
+		return imdscreds.NewIMDSCredentialsRefresher(
 			agent.ctx, imdsScanner, credentialsManager,
 			taskEngine, imdscreds.ScanInterval,
 		)

@@ -32,7 +32,6 @@ var (
 	capabilityDepsRootDir  = filepath.Join(config.AmazonECSProgramFiles, "managed-agents")
 	ssmPluginDir           = filepath.Join(config.AmazonProgramFiles, "SSM", "Plugins")
 	sessionManagerShellDir = filepath.Join(ssmPluginDir, "SessionManagerShell")
-	awsCloudWatchDir       = filepath.Join(ssmPluginDir, "awsCloudWatch")
 	awsDomainJoin          = filepath.Join(ssmPluginDir, "awsDomainJoin")
 
 	capabilityExecRequiredBinaries = []string{
@@ -47,7 +46,6 @@ var (
 		configDir:              []string{},
 		ssmPluginDir:           []string{},
 		sessionManagerShellDir: []string{},
-		awsCloudWatchDir:       []string{},
 		awsDomainJoin:          []string{},
 	}
 )
@@ -94,6 +92,10 @@ func (agent *ecsAgent) appendEBSTANonRootUserCapabilities(capabilities []types.A
 }
 
 func (agent *ecsAgent) appendEFSCapabilities(capabilities []types.Attribute) []types.Attribute {
+	return capabilities
+}
+
+func (agent *ecsAgent) appendS3FilesCapabilities(capabilities []types.Attribute) []types.Attribute {
 	return capabilities
 }
 

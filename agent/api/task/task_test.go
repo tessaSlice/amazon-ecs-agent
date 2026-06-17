@@ -1406,6 +1406,104 @@ func TestInitializeContainersV1AgentAPIEndpoint(t *testing.T) {
 	}
 }
 
+func TestApplyRegionToContainerPrecedence(t *testing.T) {
+	tests := []struct {
+		name           string
+		containerType  apicontainer.ContainerType
+		taskDefEnvs    map[string]string
+		imageEnvKeys   map[string]bool
+		instanceRegion string
+		wantRegion     string // expected AWS_REGION ("" = not injected)
+		wantDefaultReg string // expected AWS_DEFAULT_REGION ("" = not injected)
+	}{
+		{
+			name:           "no overrides — inject both vars",
+			instanceRegion: "us-west-2",
+			wantRegion:     "us-west-2",
+			wantDefaultReg: "us-west-2",
+		},
+		{
+			name:           "nil image region keys — injection still proceeds",
+			instanceRegion: "us-west-2",
+			wantRegion:     "us-west-2",
+			wantDefaultReg: "us-west-2",
+		},
+		{
+			name:           "empty region — nothing injected",
+			instanceRegion: "",
+			wantRegion:     "",
+			wantDefaultReg: "",
+		},
+		{
+			name:           "internal container (CNI pause) — skip injection",
+			containerType:  apicontainer.ContainerCNIPause,
+			instanceRegion: "us-west-2",
+			wantRegion:     "",
+			wantDefaultReg: "",
+		},
+		{
+			// Image already has AWS_REGION: neither var is injected (both would be or neither).
+			name:           "image has AWS_REGION — no injection",
+			imageEnvKeys:   map[string]bool{awsRegionEnvVar: true},
+			instanceRegion: "us-west-2",
+			wantRegion:     "",
+			wantDefaultReg: "",
+		},
+		{
+			// Image already has AWS_DEFAULT_REGION: neither var is injected.
+			name:           "image has AWS_DEFAULT_REGION — no injection",
+			imageEnvKeys:   map[string]bool{awsDefaultRegionEnvVar: true},
+			instanceRegion: "us-west-2",
+			wantRegion:     "",
+			wantDefaultReg: "",
+		},
+		{
+			// Task def already has AWS_REGION: injection skipped, task def value preserved,
+			// AWS_DEFAULT_REGION is not added.
+			name:           "task definition has AWS_REGION — no injection, task def value preserved",
+			taskDefEnvs:    map[string]string{awsRegionEnvVar: "eu-west-1"},
+			instanceRegion: "us-west-2",
+			wantRegion:     "eu-west-1",
+			wantDefaultReg: "",
+		},
+		{
+			// Task def already has AWS_DEFAULT_REGION: injection skipped, task def value
+			// preserved, AWS_REGION is not added.
+			name:           "task definition has AWS_DEFAULT_REGION — no injection, task def value preserved",
+			taskDefEnvs:    map[string]string{awsDefaultRegionEnvVar: "ap-southeast-1"},
+			instanceRegion: "us-west-2",
+			wantRegion:     "",
+			wantDefaultReg: "ap-southeast-1",
+		},
+		{
+			// Task def check runs before image check: one var in task def suppresses
+			// injection entirely, so the other var from the image is also not applied.
+			name:           "task definition has AWS_REGION, image has AWS_DEFAULT_REGION — no injection",
+			taskDefEnvs:    map[string]string{awsRegionEnvVar: "eu-west-1"},
+			imageEnvKeys:   map[string]bool{awsDefaultRegionEnvVar: true},
+			instanceRegion: "us-west-2",
+			wantRegion:     "eu-west-1",
+			wantDefaultReg: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &apicontainer.Container{
+				Name:        "app",
+				Type:        tt.containerType,
+				Environment: tt.taskDefEnvs,
+			}
+			task := Task{Containers: []*apicontainer.Container{container}}
+
+			task.ApplyRegionToContainer(container, tt.instanceRegion, tt.imageEnvKeys)
+
+			assert.Equal(t, tt.wantRegion, container.Environment[awsRegionEnvVar])
+			assert.Equal(t, tt.wantDefaultReg, container.Environment[awsDefaultRegionEnvVar])
+		})
+	}
+}
+
 func TestPostUnmarshalTaskWithLocalVolumes(t *testing.T) {
 	// Constants used here are defined in task_unix_test.go and task_windows_test.go
 	taskFromACS := ecsacs.Task{
@@ -6093,6 +6191,83 @@ func TestGetCredentialsIDForRoleType(t *testing.T) {
 				task.SetExecutionRoleCredentialsID(tc.execCredID)
 			}
 			assert.Equal(t, tc.expectedID, task.GetCredentialsIDForRoleType(tc.roleType))
+		})
+	}
+}
+
+func TestGetDockerResourcesPropagateTaskMemoryLimitCgroupV2(t *testing.T) {
+	origCgroupV2 := config.CgroupV2
+	defer func() { config.CgroupV2 = origCgroupV2 }()
+
+	testCases := []struct {
+		name            string
+		containerMemory uint
+		taskMemory      int64
+		cgroupV2        bool
+		propagate       config.Conditional
+		expectedMemory  int64
+	}{
+		{
+			name:            "propagates task memory when container has no limit on cgroupv2",
+			containerMemory: uint(0),
+			taskMemory:      int64(256),
+			cgroupV2:        true,
+			propagate:       config.ExplicitlyEnabled,
+			expectedMemory:  int64(268435456),
+		},
+		{
+			name:            "does not propagate when feature is disabled",
+			containerMemory: uint(0),
+			taskMemory:      int64(256),
+			cgroupV2:        true,
+			propagate:       config.ExplicitlyDisabled,
+			expectedMemory:  int64(0),
+		},
+		{
+			name:            "does not propagate when feature is not set",
+			containerMemory: uint(0),
+			taskMemory:      int64(256),
+			cgroupV2:        true,
+			propagate:       config.NotSet,
+			expectedMemory:  int64(0),
+		},
+		{
+			name:            "does not propagate on cgroupv1",
+			containerMemory: uint(0),
+			taskMemory:      int64(256),
+			cgroupV2:        false,
+			propagate:       config.ExplicitlyEnabled,
+			expectedMemory:  int64(0),
+		},
+		{
+			name:            "does not override explicit container memory",
+			containerMemory: uint(256),
+			taskMemory:      int64(512),
+			cgroupV2:        true,
+			propagate:       config.ExplicitlyEnabled,
+			expectedMemory:  int64(268435456),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			config.CgroupV2 = tc.cgroupV2
+			testTask := &Task{
+				Arn:    "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
+				Family: "myFamily",
+				Memory: tc.taskMemory,
+				Containers: []*apicontainer.Container{
+					{
+						Name:   "c1",
+						Memory: tc.containerMemory,
+					},
+				},
+			}
+			cfg := &config.Config{
+				PropagateTaskMemoryLimitCgroupV2: config.BooleanDefaultFalse{Value: tc.propagate},
+			}
+			resources := testTask.getDockerResources(testTask.Containers[0], cfg)
+			assert.Equal(t, tc.expectedMemory, resources.Memory)
 		})
 	}
 }

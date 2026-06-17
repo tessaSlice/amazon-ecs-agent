@@ -28,6 +28,7 @@ import (
 	ecsagentimds "github.com/aws/amazon-ecs-agent/ecs-agent/credentials/imds"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/credentials/imds/testutil"
 	ecsagentec2 "github.com/aws/amazon-ecs-agent/ecs-agent/ec2"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/metrics"
 
 	sdkimds "github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/stretchr/testify/assert"
@@ -52,8 +53,8 @@ const (
 	credID2Exec = "cred-b-exec"
 )
 
-// TestIMDSCredentialRefresh tests the integration between the IMDS
-// credential refresher, scanner, task engine state, credentials manager,
+// TestIMDSCredentialsRefresh tests the integration between the IMDS
+// credentials refresher, scanner, task engine state, credentials manager,
 // and a mock IMDS HTTP server.
 //
 // Phase 1: Setup the mock IMDS server, task engine, and credentials refresher.
@@ -63,7 +64,7 @@ const (
 //
 // Phase 3: Rotate credentials on the mock server and verify the refresher
 // picks up the new values on the next scan cycle.
-func TestIMDSCredentialRefresh(t *testing.T) {
+func TestIMDSCredentialsRefresh(t *testing.T) {
 	// Phase 1: Setup.
 	//
 	// Start a mock IMDS server.
@@ -75,11 +76,11 @@ func TestIMDSCredentialRefresh(t *testing.T) {
 	defer cleanup()
 
 	// Setup the IMDS scanner.
-	scanner := ecsagentimds.NewScanner(newEC2Client(t, mockIMDS.URL()))
+	scanner := ecsagentimds.NewScanner(newEC2Client(t, mockIMDS.URL()), metrics.NewNopEntryFactory())
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Setup the credential refresher.
-	refresher := NewIMDSCredentialRefresher(
+	// Setup the credentials refresher.
+	refresher := NewIMDSCredentialsRefresher(
 		ctx, scanner, credManager, taskEngine, testScanInterval,
 	)
 

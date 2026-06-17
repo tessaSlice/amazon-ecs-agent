@@ -600,6 +600,14 @@
       "exception":true
     },
     "Integer":{"type":"integer"},
+    "IsolationMode":{
+      "type":"string",
+      "enum":[
+        "SHARED",
+        "EXCLUSIVE",
+        "ISOLATED_PARTITION"
+      ]
+    },
     "InvalidClusterException":{
       "type":"structure",
       "members":{
@@ -615,6 +623,12 @@
       "exception":true
     },
     "Long":{"type":"long"},
+    "LogDriverVolumeConfiguration":{
+      "type":"structure",
+      "members":{
+        "driver":{"shape":"String"}
+      }
+    },
     "ManagedAgent":{
       "type":"structure",
       "members":{
@@ -906,7 +920,8 @@
         "networkMode":{"shape":"String"},
         "serviceName":{"shape":"String"},
         "group":{"shape":"String"},
-        "enableFaultInjection":{"shape":"Boolean"}
+        "enableFaultInjection":{"shape":"Boolean"},
+        "trustedExecutionConfiguration":{"shape":"TrustedExecutionConfiguration"}
       }
     },
     "TaskIdentifier":{
@@ -958,6 +973,12 @@
         "udp"
       ]
     },
+    "TrustedExecutionConfiguration":{
+      "type":"structure",
+      "members":{
+        "isolationMode":{"shape":"IsolationMode"}
+      }
+    },
     "UpdateInfo":{
       "type":"structure",
       "members":{
@@ -982,7 +1003,8 @@
         "dockerVolumeConfiguration":{"shape":"DockerVolumeConfiguration"},
         "efsVolumeConfiguration":{"shape":"EFSVolumeConfiguration"},
         "fsxWindowsFileServerVolumeConfiguration":{"shape":"FSxWindowsFileServerVolumeConfiguration"},
-        "ebsVolumeConfiguration":{"shape":"EBSVolumeConfiguration"}
+        "ebsVolumeConfiguration":{"shape":"EBSVolumeConfiguration"},
+        "logDriverVolumeConfiguration":{"shape":"LogDriverVolumeConfiguration"}
       }
     },
     "VolumeFrom":{
@@ -1007,7 +1029,8 @@
         "docker",
         "efs",
         "fsxWindowsFileServer",
-        "ebs"
+        "ebs",
+        "logDriverOutput"
       ]
     }
   }

@@ -43,6 +43,7 @@ import (
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/acs/model/ecsacs"
+	apiresource "github.com/aws/amazon-ecs-agent/ecs-agent/api/attachment/resource"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/api/container/restart"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	apierrors "github.com/aws/amazon-ecs-agent/ecs-agent/api/errors"
@@ -81,6 +82,10 @@ const (
 	// variable in containers' config, which will be used by the AWS SDK to fetch
 	// credentials.
 	awsSDKCredentialsRelativeURIPathEnvironmentVariableName = "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"
+
+	// awsRegionEnvVar and awsDefaultRegionEnvVar are the standard AWS SDK region env vars.
+	awsRegionEnvVar        = "AWS_REGION"
+	awsDefaultRegionEnvVar = "AWS_DEFAULT_REGION"
 
 	NvidiaVisibleDevicesEnvVar = "NVIDIA_VISIBLE_DEVICES"
 	GPUAssociationType         = "gpu"
@@ -200,7 +205,7 @@ type Task struct {
 	// CPU is a task-level limit for compute resources. A value of 1 means that
 	// the task may access 100% of 1 vCPU on the instance
 	CPU float64 `json:"Cpu,omitempty"`
-	// Memory is a task-level limit for memory resources in bytes
+	// Memory is a task-level limit for memory resources in MiB.
 	Memory int64 `json:"Memory,omitempty"`
 	// DesiredStatusUnsafe represents the state where the task should go. Generally,
 	// the desired status is informed by the ECS backend as a result of either
@@ -380,6 +385,10 @@ func (task *Task) initializeVolumes(cfg *config.Config, dockerClient dockerapi.D
 		return apierrors.NewResourceInitError(task.Arn, err)
 	}
 	err = task.initializeEFSVolumes(cfg, dockerClient, ctx)
+	if err != nil {
+		return apierrors.NewResourceInitError(task.Arn, err)
+	}
+	err = task.initializeS3FilesVolumes(cfg, dockerClient, ctx)
 	if err != nil {
 		return apierrors.NewResourceInitError(task.Arn, err)
 	}
@@ -870,6 +879,58 @@ func (task *Task) addEFSVolumes(
 	return nil
 }
 
+// initializeS3FilesVolumes inspects the volume definitions in the attachment.
+// If it finds S3 Files volumes in the attachment, then it converts it to a docker
+// volume definition.
+func (task *Task) initializeS3FilesVolumes(cfg *config.Config, dockerClient dockerapi.DockerClient, ctx context.Context) error {
+	for i, vol := range task.Volumes {
+		if vol.Type != apiresource.S3FilesTaskAttach {
+			continue
+		}
+		s3vol, ok := vol.Volume.(*taskresourcevolume.S3FilesVolumeConfig)
+		if !ok {
+			return errors.New("task volume: volume configuration does not match the type 's3files'")
+		}
+		err := task.addS3FilesVolumes(ctx, cfg, dockerClient, &task.Volumes[i], s3vol)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addS3FilesVolumes converts the S3 Files task definition into an internal docker volume
+// using the ECS volume plugin and updates container dependency.
+func (task *Task) addS3FilesVolumes(
+	ctx context.Context,
+	cfg *config.Config,
+	dockerClient dockerapi.DockerClient,
+	vol *TaskVolume,
+	s3vol *taskresourcevolume.S3FilesVolumeConfig,
+) error {
+	driverOpts := s3vol.GetVolumePluginDriverOptions(task.GetCredentialsRelativeURI())
+	volumeResource, err := taskresourcevolume.NewVolumeResource(
+		ctx,
+		vol.Name,
+		taskresourcevolume.S3FilesVolumeType,
+		task.volumeName(vol.Name),
+		"task",
+		false,
+		taskresourcevolume.ECSVolumePlugin,
+		driverOpts,
+		map[string]string{},
+		dockerClient,
+	)
+	if err != nil {
+		return err
+	}
+
+	vol.Volume = &volumeResource.VolumeConfig
+	task.AddResource(resourcetype.DockerVolumeKey, volumeResource)
+	task.updateContainerVolumeDependency(vol.Name)
+	return nil
+}
+
 // addTaskScopedVolumes adds the task scoped volume into task resources and updates container dependency
 func (task *Task) addTaskScopedVolumes(ctx context.Context, dockerClient dockerapi.DockerClient,
 	vol *TaskVolume) error {
@@ -1022,6 +1083,38 @@ func (task *Task) initializeCredentialsEndpoint(credentialsManager credentials.M
 	}
 
 	task.SetCredentialsRelativeURI(credentialsEndpointRelativeURI)
+}
+
+// ApplyRegionToContainer injects AWS_REGION and AWS_DEFAULT_REGION into the
+// container environment. Injection is skipped if either var is already set in
+// the task definition, environment files, or container image.
+func (task *Task) ApplyRegionToContainer(container *apicontainer.Container, region string, imageManagedEnvKeys map[string]bool) {
+	if region == "" {
+		return
+	}
+	if container.IsInternal() {
+		// Internal containers (pause, SC relay, managed daemons) do not receive injected env vars.
+		return
+	}
+
+	// Skip if the customer set either var in the task definition or environment files.
+	// Environment file vars are merged into container.Environment.
+	_, hasRegion := container.Environment[awsRegionEnvVar]
+	_, hasDefaultRegion := container.Environment[awsDefaultRegionEnvVar]
+	if hasRegion || hasDefaultRegion {
+		return
+	}
+
+	// Skip if the image already has a region preference (e.g. Dockerfile ENV).
+	if imageManagedEnvKeys[awsRegionEnvVar] || imageManagedEnvKeys[awsDefaultRegionEnvVar] {
+		return
+	}
+
+	if container.Environment == nil {
+		container.Environment = make(map[string]string)
+	}
+	container.Environment[awsRegionEnvVar] = region
+	container.Environment[awsDefaultRegionEnvVar] = region
 }
 
 // initializeContainersV3MetadataEndpoint generates a v3 endpoint id for each container, constructs the
@@ -2061,6 +2154,20 @@ func (task *Task) overrideContainerRuntime(container *apicontainer.Container, ho
 func (task *Task) getDockerResources(container *apicontainer.Container, cfg *config.Config) dockercontainer.Resources {
 	// Convert MB to B and set Memory
 	dockerMem := int64(container.Memory * 1024 * 1024)
+	// On cgroupv2, containers use private cgroup namespace by default and cannot see
+	// parent (task-level) memory limits. When PropagateTaskMemoryLimitCgroupV2 is
+	// enabled and cgroupv2 is in use, propagate the task memory limit to containers
+	// that have no explicit memory limit.
+	if dockerMem == 0 && task.Memory > 0 &&
+		config.CgroupV2 && cfg.PropagateTaskMemoryLimitCgroupV2.Enabled() {
+		dockerMem = task.Memory * 1024 * 1024
+		logger.Info("cgroupv2: Propagating task memory limit to container with no"+
+			" memory limit set", logger.Fields{
+			field.TaskID:    task.GetID(),
+			field.Container: container.Name,
+			"bytes":         dockerMem,
+		})
+	}
 	if dockerMem != 0 && dockerMem < apicontainer.DockerContainerMinimumMemoryInBytes {
 		logger.Warn("Memory setting too low for container, increasing to minimum", logger.Fields{
 			field.TaskID:    task.GetID(),
