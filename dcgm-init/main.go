@@ -31,14 +31,29 @@ import (
 
 const (
 	defaultOutputPath     = "/var/run/ecs/gpu-metrics.json"
-	defaultCollectionFreq = 10 * time.Second
+	defaultCollectionFreq = 60 * time.Second
 )
 
 func main() {
+	socketPath := flag.String("socket-path", gpu.DefaultSocketPath, "Path to the DCGM nv-hostengine Unix domain socket")
 	outputPath := flag.String("output", defaultOutputPath, "Path to write GPU metrics JSON output")
 	collectionFreq := flag.Duration("interval", defaultCollectionFreq, "Metrics collection interval")
 	oneShot := flag.Bool("once", false, "Collect metrics once and exit")
 	flag.Parse()
+
+	args := flag.Args()
+	if len(args) > 0 {
+		switch args[0] {
+		case "start":
+			// Continue to normal daemon operation below.
+		case "stop":
+			// Stop is handled by systemd sending SIGTERM; nothing to do here.
+			os.Exit(0)
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s (use 'start' or 'stop')\n", args[0])
+			os.Exit(1)
+		}
+	}
 
 	logger, err := zap.NewProduction()
 	if err != nil {
@@ -48,6 +63,7 @@ func main() {
 	defer logger.Sync()
 
 	config := gpu.Config{
+		SocketPath:                *socketPath,
 		InitializationGracePeriod: gpu.DefaultInitializationGracePeriod,
 	}
 
@@ -156,8 +172,17 @@ func collectAndWrite(ctx context.Context, client gpu.Client, logger *zap.Logger,
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	if err := os.WriteFile(outputPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write metrics to %s: %w", outputPath, err)
+	tmpPath := outputPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write metrics to %s: %w", tmpPath, err)
+	}
+
+	stagingPath := outputPath + ".staging"
+	if err := os.WriteFile(stagingPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write metrics to %s: %w", stagingPath, err)
+	}
+	if err := os.Rename(stagingPath, outputPath); err != nil {
+		return fmt.Errorf("failed to rename %s to %s: %w", stagingPath, outputPath, err)
 	}
 
 	logger.Info("metrics written", zap.String("path", outputPath), zap.Int("gpuCount", len(gpus)))

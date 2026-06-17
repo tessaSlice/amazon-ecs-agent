@@ -14,6 +14,9 @@ import (
 )
 
 const (
+	// DefaultSocketPath is the default Unix domain socket path for the DCGM nv-hostengine.
+	DefaultSocketPath = "/run/nvidia-dcgm/nv-hostengine"
+
 	// DefaultInitializationGracePeriod is the default duration after shutdown during which
 	// initialization failures are not reported as errors.
 	DefaultInitializationGracePeriod = 3 * time.Minute
@@ -202,6 +205,10 @@ type Client interface {
 
 // Config holds configuration for the DCGM client.
 type Config struct {
+	// SocketPath is the Unix domain socket path for the nv-hostengine.
+	// If empty, defaults to DefaultSocketPath.
+	SocketPath string
+
 	// InitializationGracePeriod is the duration after shutdown during which
 	// initialization failures are not reported as errors. This prevents noisy
 	// errors during expected disconnects or DCGM restarts.
@@ -211,6 +218,9 @@ type Config struct {
 
 // dcgmClient implements the Client interface.
 type dcgmClient struct {
+	// Unix domain socket path for nv-hostengine.
+	socketPath string
+
 	// Grace period after shutdown before reporting initialization errors.
 	initializationGracePeriod time.Duration
 
@@ -279,15 +289,20 @@ type dcgmClient struct {
 }
 
 // NewClient creates a new DCGM client with the given configuration.
-// The client uses embedded mode: it starts an in-process nv-hostengine,
-// requiring no external DCGM daemon or network sockets.
+// The client connects to nv-hostengine via Unix domain socket (no TCP ports).
 func NewClient(config Config, logger *zap.Logger) Client {
+	socketPath := config.SocketPath
+	if socketPath == "" {
+		socketPath = DefaultSocketPath
+	}
+
 	gracePeriod := config.InitializationGracePeriod
 	if gracePeriod == 0 {
 		gracePeriod = DefaultInitializationGracePeriod
 	}
 
 	return &dcgmClient{
+		socketPath:                socketPath,
 		initializationGracePeriod: gracePeriod,
 		lastShutdown:              time.Now(),
 		logger:                    logger,
@@ -345,11 +360,11 @@ func (c *dcgmClient) Reconcile(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// initializeLocked initializes DCGM in embedded mode and sets up monitoring.
-// Embedded mode starts an in-process nv-hostengine — no external daemon or socket needed.
+// initializeLocked connects to nv-hostengine via Unix domain socket and sets up monitoring.
+// No TCP ports are opened — communication is strictly via the local socket.
 // Caller must hold c.mu lock.
 func (c *dcgmClient) initializeLocked(ctx context.Context) error {
-	c.logger.Info("initializing DCGM client in embedded mode")
+	c.logger.Info("initializing DCGM client", zap.String("socketPath", c.socketPath))
 
 	// Check if there's already a pending initialization attempt to prevent unbounded go routine creation.
 	if !c.pendingInitAttempts.CompareAndSwap(0, 1) {
@@ -358,12 +373,8 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 		return fmt.Errorf("DCGM initialization already in progress")
 	}
 
-	// Initialize DCGM in embedded mode. This starts an in-process nv-hostengine
-	// that communicates directly with the GPU driver, requiring no external daemon
-	// or network sockets (TCP or Unix domain).
-	//
-	// dcgm.Init(dcgm.Embedded) loads libdcgm.so via dlopen and calls
-	// dcgmStartEmbedded(). It may block briefly while the GPU driver initializes.
+	// Connect to nv-hostengine via Unix domain socket. The "1" parameter indicates
+	// Unix domain socket mode (not TCP). No network ports are exposed.
 	type initResult struct {
 		cleanup func()
 		err     error
@@ -372,7 +383,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 
 	go func() {
 		defer c.pendingInitAttempts.Add(-1)
-		cleanup, err := dcgm.Init(dcgm.Embedded)
+		cleanup, err := dcgm.Init(dcgm.Standalone, c.socketPath, "1")
 		resultChan <- initResult{cleanup: cleanup, err: err}
 	}()
 
@@ -384,17 +395,21 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	select {
 	case result = <-resultChan:
 		if result.err != nil {
-			c.logger.Error("failed to initialize DCGM embedded mode", zap.Error(result.err))
+			c.logger.Error("failed to connect to nv-hostengine",
+				zap.String("socketPath", c.socketPath),
+				zap.Error(result.err))
 			return result.err
 		}
 	case <-timeoutCtx.Done():
-		c.logger.Error("timeout initializing DCGM embedded mode",
+		c.logger.Error("timeout connecting to nv-hostengine",
+			zap.String("socketPath", c.socketPath),
 			zap.Duration("timeout", initTimeout))
-		return fmt.Errorf("timeout initializing DCGM embedded mode after %v", initTimeout)
+		return fmt.Errorf("timeout connecting to nv-hostengine after %v", initTimeout)
 	}
 
 	c.cleanupFunc = result.cleanup
-	c.logger.Info("DCGM embedded mode initialized successfully")
+	c.logger.Info("successfully connected to nv-hostengine via Unix socket",
+		zap.String("socketPath", c.socketPath))
 
 	// Create context for policy violation listener.
 	policyCtx, cancel := context.WithCancel(ctx)
@@ -457,6 +472,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	c.setupXidWatch()
 
 	c.logger.Info("DCGM client initialized successfully",
+		zap.String("socketPath", c.socketPath),
 		zap.Bool("metricsWatchActive", c.metricsWatchActive),
 		zap.Bool("xidWatchActive", c.xidWatchActive))
 

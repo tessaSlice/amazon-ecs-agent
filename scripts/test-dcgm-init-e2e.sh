@@ -38,7 +38,7 @@ CREATED_SG=""
 SUBNET_ID=""
 INSTANCE_ID=""
 PUBLIC_IP=""
-BINARY_PATH="./dcgm-init-bin"
+BINARY_PATH="./amazon-dcgm-init"
 # Static, predictable env file name (independent of the SSH key name).
 ENV_FILE="dcgm-init-verify.env"
 
@@ -134,23 +134,56 @@ if [[ -z "$SECURITY_GROUP" ]]; then
     echo "Created temporary security group $SECURITY_GROUP (SSH from ${MY_IP}/32)"
 else
     echo "Using provided security group $SECURITY_GROUP (ensure it allows inbound TCP 22)"
+    VPC_ID=$(aws ec2 describe-security-groups --group-ids "$SECURITY_GROUP" --region "$REGION" \
+        --query 'SecurityGroups[0].VpcId' --output text)
 fi
 
 echo "=== Step 2: Launch GPU EC2 Instance ==="
-RUN_ARGS="--image-id $AMI_ID --instance-type $INSTANCE_TYPE --key-name $KEY_NAME --region $REGION"
-RUN_ARGS="$RUN_ARGS --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=dcgm-init-e2e-test}]'"
-
-if [[ -n "$SECURITY_GROUP" ]]; then
-    RUN_ARGS="$RUN_ARGS --security-group-ids $SECURITY_GROUP"
-fi
+# Build the list of subnets to try. Pinning a single Availability Zone causes
+# InsufficientInstanceCapacity when that AZ is out of the requested GPU type, so
+# we try each public subnet (each in a different AZ) until one has capacity.
 if [[ -n "$SUBNET_ID" ]]; then
-    RUN_ARGS="$RUN_ARGS --subnet-id $SUBNET_ID"
+    CANDIDATE_SUBNETS=("$SUBNET_ID")
+else
+    mapfile -t CANDIDATE_SUBNETS < <(aws ec2 describe-subnets \
+        --filters Name=vpc-id,Values="$VPC_ID" Name=map-public-ip-on-launch,Values=true \
+        --region "$REGION" --query 'Subnets[].SubnetId' --output text | tr '\t' '\n')
+fi
+if [[ ${#CANDIDATE_SUBNETS[@]} -eq 0 ]]; then
+    echo "ERROR: no public subnets found in $VPC_ID to launch into." >&2
+    exit 1
 fi
 
-INSTANCE_ID=$(eval aws ec2 run-instances $RUN_ARGS \
-    --query "Instances[0].InstanceId" \
-    --output text)
-echo "Launched instance: $INSTANCE_ID"
+INSTANCE_ID=""
+for subnet in "${CANDIDATE_SUBNETS[@]}"; do
+    echo "Attempting launch in subnet $subnet..."
+    set +e
+    launch_out=$(aws ec2 run-instances \
+        --image-id "$AMI_ID" --instance-type "$INSTANCE_TYPE" --key-name "$KEY_NAME" \
+        --security-group-ids "$SECURITY_GROUP" --subnet-id "$subnet" \
+        --associate-public-ip-address \
+        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=dcgm-init-e2e-test}]' \
+        --region "$REGION" --query 'Instances[0].InstanceId' --output text 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+        INSTANCE_ID="$launch_out"
+        echo "Launched instance: $INSTANCE_ID (subnet $subnet)"
+        break
+    fi
+    if echo "$launch_out" | grep -q "InsufficientInstanceCapacity"; then
+        echo "  No $INSTANCE_TYPE capacity in this AZ; trying the next subnet..."
+        continue
+    fi
+    echo "ERROR: run-instances failed: $launch_out" >&2
+    exit 1
+done
+
+if [[ -z "$INSTANCE_ID" ]]; then
+    echo "ERROR: no $INSTANCE_TYPE capacity in any AZ of $VPC_ID (region $REGION)." >&2
+    echo "Try a different --instance-type (e.g. g5.xlarge, g6.xlarge) or --region." >&2
+    exit 1
+fi
 
 echo "Waiting for instance to be running..."
 aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$REGION"

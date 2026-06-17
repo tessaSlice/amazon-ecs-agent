@@ -1,14 +1,16 @@
 [Unit]
-Description=Amazon ECS DCGM GPU Metrics Collector
-Documentation=https://github.com/aws/amazon-ecs-agent
-After=network.target docker.service
-ConditionPathExists=/dev/nvidia0
+Description=Amazon Elastic Container Service - DCGM Go bindings
+Wants=nvidia-dcgm.service
+After=nvidia-dcgm.service
+ConditionPathExists=/usr/bin/nv-hostengine
 
 [Service]
 Type=simple
-ExecStart=/usr/libexec/dcgm-init --interval 10s --output /var/run/ecs/gpu-metrics.json
 Restart=on-failure
-RestartSec=5s
+RestartPreventExitStatus=5
+RestartSec=10s
+ExecStart=/usr/libexec/dcgm-init start
+ExecStop=/usr/libexec/dcgm-init stop
 
 [Install]
 WantedBy=multi-user.target
