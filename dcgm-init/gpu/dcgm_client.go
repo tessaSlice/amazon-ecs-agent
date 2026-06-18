@@ -419,43 +419,26 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 
 	// Register policy violation listeners for all required policies.
 	// These policies monitor critical GPU health indicators that signal hardware degradation or failure.
+	// Non-fatal: some vGPU configurations may not support policy registration.
 	c.logger.Info("registering policy violation listeners")
 	policyChan, err := dcgm.ListenForPolicyViolations(policyCtx,
-		// XidPolicy: GPU hardware exceptions (XID errors).
-		// Example: XID 48 indicates a double-bit ECC error, XID 79 means
-		// the GPU fell off the PCIe bus (often due to power issues or bad connection).
 		dcgm.XidPolicy,
 	)
 	if err != nil {
-		c.logger.Error("failed to register policy listeners", zap.Error(err))
-		c.shutdownHandlers = nil
-		cancel()
-		if c.cleanupFunc != nil {
-			c.cleanupFunc()
-		}
-		return err
+		c.logger.Warn("failed to register policy listeners, health monitoring disabled", zap.Error(err))
+	} else {
+		c.logger.Info("successfully registered policy violation listeners")
+		c.policyViolationChan = policyChan
+		go c.listenForPolicyViolations()
 	}
-	c.logger.Info("successfully registered policy violation listeners")
 
-	c.policyViolationChan = policyChan
-
-	// Enable all DCGM health check systems. We consider the instance to be unhealthy even if a GPU
-	// that is not in use is impaired. This prevents a situation where a task is launched and given
-	// an impaired GPU.
+	// Enable DCGM health check systems. Non-fatal: vGPUs may not support all health watches.
 	c.logger.Info("enabling health check systems for all GPUs")
 	if err := dcgm.HealthSet(dcgm.GroupAllGPUs(), dcgm.DCGM_HEALTH_WATCH_ALL); err != nil {
-		c.logger.Error("failed to enable health check systems", zap.Error(err))
-		c.shutdownHandlers = nil
-		cancel()
-		if c.cleanupFunc != nil {
-			c.cleanupFunc()
-		}
-		return err
+		c.logger.Warn("failed to enable health check systems, health monitoring disabled", zap.Error(err))
+	} else {
+		c.logger.Info("successfully enabled health check systems")
 	}
-	c.logger.Info("successfully enabled health check systems")
-
-	// Start goroutine to listen for policy violations.
-	go c.listenForPolicyViolations()
 
 	// Mark as connected. Note: We do NOT reset hasViolation here because
 	// policy violations should persist across DCGM reconnections. Once a GPU

@@ -491,8 +491,7 @@ amazon-linux-rpm-codebuild: .amazon-linux-rpm-codebuild-done
 	cp packaging/generic-rpm-integrated/ecs.service ecs.service
 	cp packaging/generic-rpm-integrated/amazon-ecs-volume-plugin.service amazon-ecs-volume-plugin.service
 	cp packaging/generic-rpm-integrated/amazon-ecs-volume-plugin.socket amazon-ecs-volume-plugin.socket
-	cp packaging/generic-rpm-integrated/dcgm-init.service dcgm-init.service
-	tar -czf ./sources.tgz ecs-init dcgm-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
+	tar -czf ./sources.tgz ecs-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
 	test -e SOURCES || ln -s . SOURCES
 	rpmbuild --define "%_topdir $(PWD)" -bb amazon-ecs-init.spec
 	find RPMS/ -type f -exec cp {} . \;
@@ -504,8 +503,8 @@ generic-rpm-integrated: .generic-rpm-integrated-done
 .generic-deb-integrated-done: get-cni-sources
 	./scripts/update-version.sh
 	mkdir -p BUILDROOT
-	tar -czf ./amazon-ecs-init_${VERSION}.orig.tar.gz ecs-init dcgm-init scripts README.md
-	cp -r packaging/generic-deb-integrated/debian Makefile ecs-init dcgm-init scripts misc agent agent-container amazon-ecs-cni-plugins amazon-vpc-cni-plugins README.md VERSION GO_VERSION BUILDROOT
+	tar -czf ./amazon-ecs-init_${VERSION}.orig.tar.gz ecs-init scripts README.md
+	cp -r packaging/generic-deb-integrated/debian Makefile ecs-init scripts misc agent agent-container amazon-ecs-cni-plugins amazon-vpc-cni-plugins README.md VERSION GO_VERSION BUILDROOT
 	cd BUILDROOT && dpkg-buildpackage -uc -b
 	touch .generic-deb-integrated-done
 
