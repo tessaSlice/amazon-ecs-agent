@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,7 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 
 	// Simulate attaching to ContainerMetric
 	containerMetric := &ecstcs.ContainerMetric{
-		ContainerName:         strPtr("gpu-workload"),
+		ContainerName:         aws.String("gpu-workload"),
 		GeneralMetricsPayload: containerPayload,
 	}
 
@@ -74,7 +75,7 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 		InstanceMetrics: instanceMetrics,
 		TaskMetrics: []*ecstcs.TaskMetric{
 			{
-				TaskArn:          strPtr("arn:aws:ecs:us-west-2:123456789:task/cluster/task-id"),
+				TaskArn:          aws.String("arn:aws:ecs:us-west-2:123456789:task/cluster/task-id"),
 				ContainerMetrics: []*ecstcs.ContainerMetric{containerMetric},
 			},
 		},
@@ -118,10 +119,10 @@ func TestGPUMetrics_OmittedFromPayload_WhenNoGPUs(t *testing.T) {
 		InstanceMetrics: nil,
 		TaskMetrics: []*ecstcs.TaskMetric{
 			{
-				TaskArn: strPtr("arn:aws:ecs:us-west-2:123456789:task/cluster/task-id"),
+				TaskArn: aws.String("arn:aws:ecs:us-west-2:123456789:task/cluster/task-id"),
 				ContainerMetrics: []*ecstcs.ContainerMetric{
 					{
-						ContainerName:         strPtr("non-gpu-container"),
+						ContainerName:         aws.String("non-gpu-container"),
 						GeneralMetricsPayload: nil, // No GPU metrics attached
 					},
 				},

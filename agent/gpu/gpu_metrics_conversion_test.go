@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -507,7 +508,7 @@ func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 			rawPayload: []*ecstcs.GeneralMetricsWrapper{
 				{GeneralMetrics: []*ecstcs.GeneralMetric{
 					{MetricName: nil, MetricValueLong: ptrInt64(1)},
-					{MetricName: strPtr("InstanceGPULimit"), MetricValueLong: nil},
+					{MetricName: aws.String("InstanceGPULimit"), MetricValueLong: nil},
 				}},
 			},
 			expectOK: false,

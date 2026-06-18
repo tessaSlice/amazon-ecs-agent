@@ -4,6 +4,7 @@ package gpu
 
 import (
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
+	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 // GPU metric names as they appear in the TACS GeneralMetric payload.
@@ -30,8 +31,6 @@ const (
 // gpuDeviceDimensionKey is the dimension key used to identify accelerated devices.
 const gpuDeviceDimensionKey = "AcceleratedDevice"
 
-func strPtr(s string) *string { return &s }
-
 // gpuMetricToGeneralMetricsWrapper converts a single GPUMetric to a GeneralMetricsWrapper.
 // Only non-nil metric fields are included. Returns nil if all metric fields are nil.
 func gpuMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper {
@@ -39,46 +38,46 @@ func gpuMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper
 
 	if m.GPUUtilization != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUUtilization),
+			MetricName:        aws.String(gpuMetricNameGPUUtilization),
 			MetricValueDouble: m.GPUUtilization,
-			Unit:              strPtr(gpuMetricUnitPercent),
+			Unit:              aws.String(gpuMetricUnitPercent),
 		})
 	}
 	if m.MemoryUtilization != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUMemoryUtilization),
+			MetricName:        aws.String(gpuMetricNameGPUMemoryUtilization),
 			MetricValueDouble: m.MemoryUtilization,
-			Unit:              strPtr(gpuMetricUnitPercent),
+			Unit:              aws.String(gpuMetricUnitPercent),
 		})
 	}
 	if m.MemoryTotal != nil {
 		v := int64(*m.MemoryTotal) //nolint:gosec // Max GPU memory is ~141 GB (H200); int64 max is ~9.2 EB. Overflow is impossible.
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:      strPtr(gpuMetricNameGPUMemoryTotal),
+			MetricName:      aws.String(gpuMetricNameGPUMemoryTotal),
 			MetricValueLong: &v,
-			Unit:            strPtr(gpuMetricUnitBytes),
+			Unit:            aws.String(gpuMetricUnitBytes),
 		})
 	}
 	if m.MemoryUsed != nil {
 		v := int64(*m.MemoryUsed) //nolint:gosec // Max GPU memory is ~141 GB (H200); int64 max is ~9.2 EB. Overflow is impossible.
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:      strPtr(gpuMetricNameGPUMemoryUsed),
+			MetricName:      aws.String(gpuMetricNameGPUMemoryUsed),
 			MetricValueLong: &v,
-			Unit:            strPtr(gpuMetricUnitBytes),
+			Unit:            aws.String(gpuMetricUnitBytes),
 		})
 	}
 	if m.PowerDraw != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUPowerDraw),
+			MetricName:        aws.String(gpuMetricNameGPUPowerDraw),
 			MetricValueDouble: m.PowerDraw,
-			Unit:              strPtr(gpuMetricUnitNone),
+			Unit:              aws.String(gpuMetricUnitNone),
 		})
 	}
 	if m.Temperature != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUTemperature),
+			MetricName:        aws.String(gpuMetricNameGPUTemperature),
 			MetricValueDouble: m.Temperature,
-			Unit:              strPtr(gpuMetricUnitNone),
+			Unit:              aws.String(gpuMetricUnitNone),
 		})
 	}
 	if len(generalMetrics) == 0 {
@@ -88,16 +87,16 @@ func gpuMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper
 	// Always include RESTART_APP XID count so customers see 0 instead of "No Data".
 	xidCount := m.RestartAppXidCount
 	generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-		MetricName:      strPtr(gpuMetricNameGPURestartAppXidCount),
+		MetricName:      aws.String(gpuMetricNameGPURestartAppXidCount),
 		MetricValueLong: &xidCount,
-		Unit:            strPtr(gpuMetricUnitCount),
+		Unit:            aws.String(gpuMetricUnitCount),
 	})
 
 	return &ecstcs.GeneralMetricsWrapper{
 		Dimensions: []*ecstcs.Dimension{
 			{
-				Key:   strPtr(gpuDeviceDimensionKey),
-				Value: strPtr(m.GPUUUID),
+				Key:   aws.String(gpuDeviceDimensionKey),
+				Value: aws.String(m.GPUUUID),
 			},
 		},
 		GeneralMetrics: generalMetrics,
@@ -119,14 +118,14 @@ func gpuMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstc
 		{
 			GeneralMetrics: []*ecstcs.GeneralMetric{
 				{
-					MetricName:      strPtr(gpuMetricNameInstanceGPULimitCount),
+					MetricName:      aws.String(gpuMetricNameInstanceGPULimitCount),
 					MetricValueLong: &limitCount,
-					Unit:            strPtr(gpuMetricUnitCount),
+					Unit:            aws.String(gpuMetricUnitCount),
 				},
 				{
-					MetricName:      strPtr(gpuMetricNameInstanceGPUUsageTotal),
+					MetricName:      aws.String(gpuMetricNameInstanceGPUUsageTotal),
 					MetricValueLong: &usageTotal,
-					Unit:            strPtr(gpuMetricUnitCount),
+					Unit:            aws.String(gpuMetricUnitCount),
 				},
 			},
 		},
