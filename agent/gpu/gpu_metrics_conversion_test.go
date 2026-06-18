@@ -28,12 +28,12 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			name: "all fields populated",
 			metric: GPUMetric{
 				GPUUUID:           "GPU-abc-123",
-				GPUUtilization:    ptrFloat64(75.5),
-				MemoryUtilization: ptrFloat64(60.0),
-				MemoryTotal:       uint64Ptr(8589934592),
-				MemoryUsed:        uint64Ptr(4294967296),
-				PowerDraw:         ptrFloat64(250.0),
-				Temperature:       ptrFloat64(72.0),
+				GPUUtilization:    aws.Float64(75.5),
+				MemoryUtilization: aws.Float64(60.0),
+				MemoryTotal:       aws.Uint64(8589934592),
+				MemoryUsed:        aws.Uint64(4294967296),
+				PowerDraw:         aws.Float64(250.0),
+				Temperature:       aws.Float64(72.0),
 			},
 			expectNil:        false,
 			expectedCount:    7,
@@ -58,7 +58,7 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			name: "only GPUUtilization set",
 			metric: GPUMetric{
 				GPUUUID:        "GPU-single-util",
-				GPUUtilization: ptrFloat64(42.0),
+				GPUUtilization: aws.Float64(42.0),
 			},
 			expectNil:         false,
 			expectedCount:     2,
@@ -71,8 +71,8 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			name: "only integer fields set",
 			metric: GPUMetric{
 				GPUUUID:     "GPU-int-only",
-				MemoryTotal: uint64Ptr(16000000000),
-				MemoryUsed:  uint64Ptr(8000000000),
+				MemoryTotal: aws.Uint64(16000000000),
+				MemoryUsed:  aws.Uint64(8000000000),
 			},
 			expectNil:         false,
 			expectedCount:     3,
@@ -85,11 +85,11 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			name: "mixed nil and non-nil fields",
 			metric: GPUMetric{
 				GPUUUID:           "GPU-mixed",
-				GPUUtilization:    ptrFloat64(90.0),
+				GPUUtilization:    aws.Float64(90.0),
 				MemoryUtilization: nil,
-				MemoryTotal:       uint64Ptr(1024),
+				MemoryTotal:       aws.Uint64(1024),
 				MemoryUsed:        nil,
-				PowerDraw:         ptrFloat64(100.0),
+				PowerDraw:         aws.Float64(100.0),
 				Temperature:       nil,
 			},
 			expectNil:         false,
@@ -103,7 +103,7 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			name: "empty GPUUUID with fields populated",
 			metric: GPUMetric{
 				GPUUUID:        "",
-				GPUUtilization: ptrFloat64(10.0),
+				GPUUtilization: aws.Float64(10.0),
 			},
 			expectNil:         false,
 			expectedCount:     2,
@@ -116,12 +116,12 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			name: "zero values for all fields",
 			metric: GPUMetric{
 				GPUUUID:           "GPU-zeros",
-				GPUUtilization:    ptrFloat64(0),
-				MemoryUtilization: ptrFloat64(0),
-				MemoryTotal:       uint64Ptr(0),
-				MemoryUsed:        uint64Ptr(0),
-				PowerDraw:         ptrFloat64(0),
-				Temperature:       ptrFloat64(0),
+				GPUUtilization:    aws.Float64(0),
+				MemoryUtilization: aws.Float64(0),
+				MemoryTotal:       aws.Uint64(0),
+				MemoryUsed:        aws.Uint64(0),
+				PowerDraw:         aws.Float64(0),
+				Temperature:       aws.Float64(0),
 			},
 			expectNil:        false,
 			expectedCount:    7,
@@ -196,7 +196,7 @@ func TestGpuMetricsToInstancePayload(t *testing.T) {
 		{
 			name: "single device with usage total 1",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
 			},
 			usageTotal:    1,
 			expectNil:     false,
@@ -206,9 +206,9 @@ func TestGpuMetricsToInstancePayload(t *testing.T) {
 		{
 			name: "multiple devices with usage total matching count",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
-				{GPUUUID: "GPU-2", Temperature: ptrFloat64(70.0)},
-				{GPUUUID: "GPU-3", MemoryTotal: uint64Ptr(8000)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+				{GPUUUID: "GPU-3", MemoryTotal: aws.Uint64(8000)},
 			},
 			usageTotal:    3,
 			expectNil:     false,
@@ -218,9 +218,9 @@ func TestGpuMetricsToInstancePayload(t *testing.T) {
 		{
 			name: "usage total less than device count",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
 				{GPUUUID: "GPU-2"},
-				{GPUUUID: "GPU-3", Temperature: ptrFloat64(70.0)},
+				{GPUUUID: "GPU-3", Temperature: aws.Float64(70.0)},
 				{GPUUUID: "GPU-4"},
 			},
 			usageTotal:    2,
@@ -326,7 +326,7 @@ func TestGpuMetricsForContainer(t *testing.T) {
 		{
 			name: "empty device list returns nil",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
 			},
 			deviceIDs: []string{},
 			expectNil: true,
@@ -334,7 +334,7 @@ func TestGpuMetricsForContainer(t *testing.T) {
 		{
 			name: "nil device list returns nil",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
 			},
 			deviceIDs: nil,
 			expectNil: true,
@@ -342,9 +342,9 @@ func TestGpuMetricsForContainer(t *testing.T) {
 		{
 			name: "matching UUIDs returns correct wrappers",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
-				{GPUUUID: "GPU-2", Temperature: ptrFloat64(70.0)},
-				{GPUUUID: "GPU-3", PowerDraw: ptrFloat64(200.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+				{GPUUUID: "GPU-3", PowerDraw: aws.Float64(200.0)},
 			},
 			deviceIDs:     []string{"GPU-1", "GPU-3"},
 			expectNil:     false,
@@ -353,8 +353,8 @@ func TestGpuMetricsForContainer(t *testing.T) {
 		{
 			name: "no matching UUIDs returns nil",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
-				{GPUUUID: "GPU-2", Temperature: ptrFloat64(70.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
 			},
 			deviceIDs: []string{"GPU-99", "GPU-100"},
 			expectNil: true,
@@ -362,9 +362,9 @@ func TestGpuMetricsForContainer(t *testing.T) {
 		{
 			name: "partial matches returns only matched",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
-				{GPUUUID: "GPU-2", Temperature: ptrFloat64(70.0)},
-				{GPUUUID: "GPU-3", PowerDraw: ptrFloat64(200.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+				{GPUUUID: "GPU-3", PowerDraw: aws.Float64(200.0)},
 			},
 			deviceIDs:     []string{"GPU-2", "GPU-99"},
 			expectNil:     false,
@@ -381,8 +381,8 @@ func TestGpuMetricsForContainer(t *testing.T) {
 		{
 			name: "all UUIDs match",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
-				{GPUUUID: "GPU-2", Temperature: ptrFloat64(70.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
 			},
 			deviceIDs:     []string{"GPU-1", "GPU-2"},
 			expectNil:     false,
@@ -417,14 +417,6 @@ func TestGpuMetricsForContainer(t *testing.T) {
 	}
 }
 
-// uint64Ptr is a helper to create a pointer to a uint64 value.
-func uint64Ptr(v uint64) *uint64 {
-	return &v
-}
-
-func ptrInt64(v int64) *int64 {
-	return &v
-}
 
 // TestExtractInstanceGPUPayloadValues verifies that extractInstanceGPUPayloadValues
 // correctly extracts InstanceGPULimit and InstanceGPUUsageTotal from payloads produced
@@ -445,7 +437,7 @@ func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 		{
 			name: "round-trip single device usage 1",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
 			},
 			usageTotal:    1,
 			buildPayload:  true,
@@ -507,7 +499,7 @@ func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 			buildPayload: false,
 			rawPayload: []*ecstcs.GeneralMetricsWrapper{
 				{GeneralMetrics: []*ecstcs.GeneralMetric{
-					{MetricName: nil, MetricValueLong: ptrInt64(1)},
+					{MetricName: nil, MetricValueLong: aws.Int64(1)},
 					{MetricName: aws.String("InstanceGPULimit"), MetricValueLong: nil},
 				}},
 			},
