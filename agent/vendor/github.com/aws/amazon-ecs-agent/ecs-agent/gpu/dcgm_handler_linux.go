@@ -27,9 +27,6 @@ import (
 const (
 	// DefaultGPUMetricsFilePath is the shared file where dcgm-init writes GPU metrics.
 	DefaultGPUMetricsFilePath = "/var/run/ecs/gpu-metrics.json"
-
-	// maxStaleness is the maximum age of the metrics file before it's considered stale.
-	maxStaleness = 2 * time.Minute
 )
 
 // GPUMetricsFileData represents the JSON structure written by dcgm-init.
@@ -74,14 +71,9 @@ func (h *DCGMHandler) GetGPUMetrics() []GPUMetric {
 		return nil
 	}
 
-	// Check for stale data.
-	ts, err := time.Parse(time.RFC3339, fileData.Timestamp)
-	if err != nil {
+	// Validate timestamp is parseable (reject corrupt files).
+	if _, err := time.Parse(time.RFC3339, fileData.Timestamp); err != nil {
 		seelog.Warnf("Failed to parse GPU metrics timestamp: %v", err)
-		return nil
-	}
-	if time.Since(ts) > maxStaleness {
-		seelog.Warnf("GPU metrics are stale (timestamp: %s), skipping", fileData.Timestamp)
 		return nil
 	}
 

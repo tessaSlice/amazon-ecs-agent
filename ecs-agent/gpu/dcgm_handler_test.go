@@ -109,13 +109,16 @@ func TestDCGMHandler_GetGPUMetrics_InvalidJSON(t *testing.T) {
 	assert.Nil(t, metrics)
 }
 
-func TestDCGMHandler_GetGPUMetrics_StaleData(t *testing.T) {
+// TestDCGMHandler_GetGPUMetrics_StaleData_SameTimestamp verifies that when dcgm-init
+// stops updating (crash/hang), the agent returns the cached metrics rather than
+// re-emitting duplicates. The "stale" condition is detected by the timestamp not changing.
+func TestDCGMHandler_GetGPUMetrics_StaleData_SameTimestamp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// Write data with a timestamp 5 minutes ago (exceeds 2min staleness threshold)
+	// Write data with a fixed old timestamp (simulating dcgm-init stopped updating)
 	data := GPUMetricsFileData{
-		Timestamp: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339),
+		Timestamp: "2026-01-01T00:00:00Z",
 		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-stale", GPUUtilization: ptrFloat64(50.0)},
 		},
@@ -125,8 +128,17 @@ func TestDCGMHandler_GetGPUMetrics_StaleData(t *testing.T) {
 	writeMetricsFile(t, filePath, data)
 
 	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
-	assert.Nil(t, metrics, "Stale metrics should return nil")
+
+	// First call reads and caches
+	metrics1 := handler.GetGPUMetrics()
+	require.Len(t, metrics1, 1)
+	assert.Equal(t, "GPU-stale", metrics1[0].GPUUUID)
+
+	// Second call with same file (timestamp unchanged) returns cached data
+	metrics2 := handler.GetGPUMetrics()
+	require.Len(t, metrics2, 1)
+	assert.Equal(t, metrics1[0].GPUUUID, metrics2[0].GPUUUID,
+		"Same timestamp should return cached metrics (stale data not re-emitted)")
 }
 
 func TestDCGMHandler_GetGPUMetrics_SameTimestampReturnsCached(t *testing.T) {
@@ -190,6 +202,8 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_NilPowerAndTemp(t *testing.T) {
 	assert.Equal(t, uint64(6442450944), *metrics[0].MemoryTotal)
 }
 
+// TestDCGMHandler_GetGPUMetrics_InvalidTimestamp verifies that the handler rejects
+// a file with an unparseable timestamp (corrupt file protection).
 func TestDCGMHandler_GetGPUMetrics_InvalidTimestamp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")

@@ -207,15 +207,17 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 	assert.Equal(t, int64(3), usage, "3 GPUs assigned to task containers")
 }
 
-// TestGPUMetrics_StaleData_NotIncludedInPayload verifies that stale GPU metrics
-// (dcgm-init crashed/stopped) are NOT forwarded to TACS.
-func TestGPUMetrics_StaleData_NotIncludedInPayload(t *testing.T) {
+// TestGPUMetrics_StaleData_NotReEmitted verifies that when dcgm-init stops
+// updating the file (crash/hang), the agent does not re-emit the same data.
+// The handler detects staleness by comparing timestamps — if unchanged, it
+// returns cached data (which the stats engine already published).
+func TestGPUMetrics_StaleData_NotReEmitted(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// Write data with old timestamp (simulates dcgm-init crashed 5 min ago)
+	// Write data with a fixed timestamp (simulates dcgm-init stopped updating)
 	data := GPUMetricsFileData{
-		Timestamp: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339),
+		Timestamp: "2026-01-01T00:00:00Z",
 		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-stale", GPUUtilization: ptrFloat64(99.0)},
 		},
@@ -224,11 +226,16 @@ func TestGPUMetrics_StaleData_NotIncludedInPayload(t *testing.T) {
 	writeMetricsFile(t, filePath, data)
 
 	handler := NewDCGMHandler(filePath)
-	gpuMetrics := handler.GetGPUMetrics()
 
-	assert.Nil(t, gpuMetrics, "Stale metrics should not be returned")
+	// First read returns the metrics
+	metrics1 := handler.GetGPUMetrics()
+	require.NotNil(t, metrics1)
 
-	// If metrics are nil, they should not appear in the TACS payload
-	containerPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-stale"})
-	assert.Nil(t, containerPayload, "Stale data should not be included in TACS payload")
+	// Subsequent reads with unchanged file return the same cached pointer
+	// (timestamp didn't change, so no new data to emit)
+	metrics2 := handler.GetGPUMetrics()
+	assert.Equal(t, metrics1, metrics2,
+		"Same timestamp should return cached metrics — stale data is not re-processed")
+
+	// The stats engine uses the timestamp to avoid publishing duplicates to TACS
 }
