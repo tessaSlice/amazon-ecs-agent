@@ -27,6 +27,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Test constants to avoid hardcoding values throughout.
+const (
+	testGPUUUID0 = "GPU-abc-123"
+	testGPUUUID1 = "GPU-0"
+	testGPUUUID2 = "GPU-1"
+	testGPUUUID3 = "GPU-2"
+	testGPUUUID4 = "GPU-3"
+
+	testUtilization0 = 85.0
+	testUtilization1 = 100.0
+	testUtilization2 = 75.0
+	testUtilization3 = 50.0
+	testUtilization4 = 25.0
+
+	testMemUtil0 = 50.0
+
+	testMemTotal0     = uint64(16106127360) // 15 GiB (Tesla T4)
+	testMemUsed0      = uint64(8053063680)  // ~7.5 GiB
+	testFractionalMem = uint64(6442450944)  // 6 GiB (L4-6Q fractional)
+
+	testPowerDraw0 = 250.5
+	testTemp0      = 72.0
+	testTemp1      = 55.0
+	testTemp2      = 50.0
+	testTemp3      = 45.0
+	testTemp4      = 40.0
+
+	testFractionalUtil    = 0.0
+	testFractionalMemUtil = 7.5
+
+	testStaleTimestamp   = "2026-01-01T00:00:00Z"
+	testInvalidTimestamp = "not-a-timestamp"
+)
+
 func TestDCGMHandler_GetGPUMetrics_ValidFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
@@ -35,13 +69,13 @@ func TestDCGMHandler_GetGPUMetrics_ValidFile(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs: []GPUMetric{
 			{
-				GPUUUID:            "GPU-abc-123",
-				GPUUtilization:     aws.Float64(85.0),
-				MemoryUtilization:  aws.Float64(50.0),
-				MemoryTotal:        aws.Uint64(16106127360),
-				MemoryUsed:         aws.Uint64(8053063680),
-				PowerDraw:          aws.Float64(250.5),
-				Temperature:        aws.Float64(72.0),
+				GPUUUID:            testGPUUUID0,
+				GPUUtilization:     aws.Float64(testUtilization0),
+				MemoryUtilization:  aws.Float64(testMemUtil0),
+				MemoryTotal:        aws.Uint64(testMemTotal0),
+				MemoryUsed:         aws.Uint64(testMemUsed0),
+				PowerDraw:          aws.Float64(testPowerDraw0),
+				Temperature:        aws.Float64(testTemp0),
 				RestartAppXidCount: 0,
 			},
 		},
@@ -54,13 +88,13 @@ func TestDCGMHandler_GetGPUMetrics_ValidFile(t *testing.T) {
 	metrics := handler.GetGPUMetrics()
 
 	require.Len(t, metrics, 1)
-	assert.Equal(t, "GPU-abc-123", metrics[0].GPUUUID)
-	assert.Equal(t, 85.0, *metrics[0].GPUUtilization)
-	assert.Equal(t, 50.0, *metrics[0].MemoryUtilization)
-	assert.Equal(t, uint64(16106127360), *metrics[0].MemoryTotal)
-	assert.Equal(t, uint64(8053063680), *metrics[0].MemoryUsed)
-	assert.Equal(t, 250.5, *metrics[0].PowerDraw)
-	assert.Equal(t, 72.0, *metrics[0].Temperature)
+	assert.Equal(t, testGPUUUID0, metrics[0].GPUUUID)
+	assert.Equal(t, testUtilization0, *metrics[0].GPUUtilization)
+	assert.Equal(t, testMemUtil0, *metrics[0].MemoryUtilization)
+	assert.Equal(t, testMemTotal0, *metrics[0].MemoryTotal)
+	assert.Equal(t, testMemUsed0, *metrics[0].MemoryUsed)
+	assert.Equal(t, testPowerDraw0, *metrics[0].PowerDraw)
+	assert.Equal(t, testTemp0, *metrics[0].Temperature)
 	assert.Equal(t, int64(0), metrics[0].RestartAppXidCount)
 }
 
@@ -68,15 +102,53 @@ func TestDCGMHandler_GetGPUMetrics_MultipleGPUs(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
+	expectedGPUs := []GPUMetric{
+		{
+			GPUUUID:            testGPUUUID1,
+			GPUUtilization:     aws.Float64(testUtilization1),
+			MemoryUtilization:  aws.Float64(60.0),
+			MemoryTotal:        aws.Uint64(testMemTotal0),
+			MemoryUsed:         aws.Uint64(testMemUsed0),
+			PowerDraw:          aws.Float64(70.0),
+			Temperature:        aws.Float64(testTemp1),
+			RestartAppXidCount: 0,
+		},
+		{
+			GPUUUID:            testGPUUUID2,
+			GPUUtilization:     aws.Float64(testUtilization2),
+			MemoryUtilization:  aws.Float64(45.0),
+			MemoryTotal:        aws.Uint64(testMemTotal0),
+			MemoryUsed:         aws.Uint64(4026531840),
+			PowerDraw:          aws.Float64(65.0),
+			Temperature:        aws.Float64(testTemp2),
+			RestartAppXidCount: 1,
+		},
+		{
+			GPUUUID:            testGPUUUID3,
+			GPUUtilization:     aws.Float64(testUtilization3),
+			MemoryUtilization:  aws.Float64(30.0),
+			MemoryTotal:        aws.Uint64(testMemTotal0),
+			MemoryUsed:         aws.Uint64(2013265920),
+			PowerDraw:          aws.Float64(50.0),
+			Temperature:        aws.Float64(testTemp3),
+			RestartAppXidCount: 0,
+		},
+		{
+			GPUUUID:            testGPUUUID4,
+			GPUUtilization:     aws.Float64(testUtilization4),
+			MemoryUtilization:  aws.Float64(10.0),
+			MemoryTotal:        aws.Uint64(testMemTotal0),
+			MemoryUsed:         aws.Uint64(0),
+			PowerDraw:          aws.Float64(9.0),
+			Temperature:        aws.Float64(testTemp4),
+			RestartAppXidCount: 0,
+		},
+	}
+
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-0", GPUUtilization: aws.Float64(100.0), Temperature: aws.Float64(55.0)},
-			{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(75.0), Temperature: aws.Float64(50.0)},
-			{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(50.0), Temperature: aws.Float64(45.0)},
-			{GPUUUID: "GPU-3", GPUUtilization: aws.Float64(25.0), Temperature: aws.Float64(40.0)},
-		},
-		Healthy: true,
+		GPUs:      expectedGPUs,
+		Healthy:   true,
 	}
 
 	writeMetricsFile(t, filePath, data)
@@ -84,11 +156,19 @@ func TestDCGMHandler_GetGPUMetrics_MultipleGPUs(t *testing.T) {
 	handler := NewDCGMHandler(filePath)
 	metrics := handler.GetGPUMetrics()
 
-	require.Len(t, metrics, 4)
-	assert.Equal(t, "GPU-0", metrics[0].GPUUUID)
-	assert.Equal(t, "GPU-3", metrics[3].GPUUUID)
-	assert.Equal(t, 100.0, *metrics[0].GPUUtilization)
-	assert.Equal(t, 25.0, *metrics[3].GPUUtilization)
+	require.Len(t, metrics, len(expectedGPUs))
+
+	for i, expected := range expectedGPUs {
+		actual := metrics[i]
+		assert.Equal(t, expected.GPUUUID, actual.GPUUUID, "GPU %d UUID mismatch", i)
+		assert.Equal(t, *expected.GPUUtilization, *actual.GPUUtilization, "GPU %d utilization mismatch", i)
+		assert.Equal(t, *expected.MemoryUtilization, *actual.MemoryUtilization, "GPU %d memory utilization mismatch", i)
+		assert.Equal(t, *expected.MemoryTotal, *actual.MemoryTotal, "GPU %d memory total mismatch", i)
+		assert.Equal(t, *expected.MemoryUsed, *actual.MemoryUsed, "GPU %d memory used mismatch", i)
+		assert.Equal(t, *expected.PowerDraw, *actual.PowerDraw, "GPU %d power draw mismatch", i)
+		assert.Equal(t, *expected.Temperature, *actual.Temperature, "GPU %d temperature mismatch", i)
+		assert.Equal(t, expected.RestartAppXidCount, actual.RestartAppXidCount, "GPU %d XID count mismatch", i)
+	}
 }
 
 func TestDCGMHandler_GetGPUMetrics_FileNotFound(t *testing.T) {
@@ -124,11 +204,10 @@ func TestDCGMHandler_GetGPUMetrics_StaleData_SameTimestamp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// Write data with a fixed old timestamp (simulating dcgm-init stopped updating)
 	data := GPUMetricsFileData{
-		Timestamp: "2026-01-01T00:00:00Z",
+		Timestamp: testStaleTimestamp,
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-stale", GPUUtilization: aws.Float64(50.0)},
+			{GPUUUID: "GPU-stale", GPUUtilization: aws.Float64(testUtilization3)},
 		},
 		Healthy: true,
 	}
@@ -180,15 +259,14 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_NilPowerAndTemp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// Fractional vGPUs (g6f instances) don't report power or temperature
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs: []GPUMetric{
 			{
 				GPUUUID:            "GPU-fractional",
-				GPUUtilization:     aws.Float64(0.0),
-				MemoryUtilization:  aws.Float64(7.5),
-				MemoryTotal:        aws.Uint64(6442450944),
+				GPUUtilization:     aws.Float64(testFractionalUtil),
+				MemoryUtilization:  aws.Float64(testFractionalMemUtil),
+				MemoryTotal:        aws.Uint64(testFractionalMem),
 				MemoryUsed:         aws.Uint64(0),
 				PowerDraw:          nil,
 				Temperature:        nil,
@@ -205,9 +283,11 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_NilPowerAndTemp(t *testing.T) {
 
 	require.Len(t, metrics, 1)
 	assert.Equal(t, "GPU-fractional", metrics[0].GPUUUID)
+	assert.Equal(t, testFractionalUtil, *metrics[0].GPUUtilization)
+	assert.Equal(t, testFractionalMemUtil, *metrics[0].MemoryUtilization)
+	assert.Equal(t, testFractionalMem, *metrics[0].MemoryTotal)
 	assert.Nil(t, metrics[0].PowerDraw, "Fractional vGPU should not report power")
 	assert.Nil(t, metrics[0].Temperature, "Fractional vGPU should not report temperature")
-	assert.Equal(t, uint64(6442450944), *metrics[0].MemoryTotal)
 }
 
 // TestDCGMHandler_GetGPUMetrics_InvalidTimestamp verifies that the handler rejects
@@ -217,7 +297,7 @@ func TestDCGMHandler_GetGPUMetrics_InvalidTimestamp(t *testing.T) {
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
 	data := GPUMetricsFileData{
-		Timestamp: "not-a-timestamp",
+		Timestamp: testInvalidTimestamp,
 		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-bad-ts"},
 		},
