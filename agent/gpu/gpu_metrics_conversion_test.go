@@ -417,7 +417,6 @@ func TestGpuMetricsForContainer(t *testing.T) {
 	}
 }
 
-
 // TestExtractInstanceGPUPayloadValues verifies that extractInstanceGPUPayloadValues
 // correctly extracts InstanceGPULimit and InstanceGPUUsageTotal from payloads produced
 // by GPUMetricsToInstancePayload, and returns ok=false for invalid payloads.
@@ -532,4 +531,3 @@ func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 		})
 	}
 }
-

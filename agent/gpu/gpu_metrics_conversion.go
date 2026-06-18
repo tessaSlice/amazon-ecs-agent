@@ -188,5 +188,3 @@ func GPUMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstc
 
 	return result
 }
-
-
