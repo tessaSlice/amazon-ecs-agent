@@ -11,6 +11,7 @@ const (
 	gpuMetricNameGPUUtilization        = "GPUUtilization"
 	gpuMetricNameGPUMemoryUtilization  = "GPUMemoryUtilization"
 	gpuMetricNameGPUMemoryTotal        = "GPUMemoryTotal"
+	gpuMetricNameGPUMemoryUsed         = "GPUMemoryUsed"
 	gpuMetricNameGPUPowerDraw          = "GPUPowerDraw"
 	gpuMetricNameGPUTemperature        = "GPUTemperature"
 	gpuMetricNameInstanceGPULimitCount = "InstanceGPULimit"
@@ -29,75 +30,83 @@ const (
 // gpuDeviceDimensionKey is the dimension key used to identify accelerated devices.
 const gpuDeviceDimensionKey = "AcceleratedDevice"
 
-func strPtr(s string) *string { return &s }
-
-// GPUMetricToGeneralMetricsWrapper converts a single GPUMetric to a GeneralMetricsWrapper.
+// gpuMetricToGeneralMetricsWrapper converts a single GPUMetric to a GeneralMetricsWrapper.
 // Only non-nil metric fields are included. Returns nil if all metric fields are nil.
-func GPUMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper {
+func gpuMetricToGeneralMetricsWrapper(m dcgm.GPUMetric) *ecstcs.GeneralMetricsWrapper {
 	var generalMetrics []*ecstcs.GeneralMetric
 
 	if m.GPUUtilization != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUUtilization),
+			MetricName:        new(gpuMetricNameGPUUtilization),
 			MetricValueDouble: m.GPUUtilization,
-			Unit:              strPtr(gpuMetricUnitPercent),
+			Unit:              new(gpuMetricUnitPercent),
 		})
 	}
 	if m.MemoryUtilization != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUMemoryUtilization),
+			MetricName:        new(gpuMetricNameGPUMemoryUtilization),
 			MetricValueDouble: m.MemoryUtilization,
-			Unit:              strPtr(gpuMetricUnitPercent),
+			Unit:              new(gpuMetricUnitPercent),
 		})
 	}
 	if m.MemoryTotal != nil {
-		v := int64(*m.MemoryTotal) //nolint:gosec
+		v := int64(*m.MemoryTotal) //nolint:gosec // Max GPU memory is ~141 GB (H200); int64 max is ~9.2 EB. Overflow is impossible.
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:      strPtr(gpuMetricNameGPUMemoryTotal),
+			MetricName:      new(gpuMetricNameGPUMemoryTotal),
 			MetricValueLong: &v,
-			Unit:            strPtr(gpuMetricUnitBytes),
+			Unit:            new(gpuMetricUnitBytes),
+		})
+	}
+	if m.MemoryUsed != nil {
+		v := int64(*m.MemoryUsed) //nolint:gosec // Max GPU memory is ~141 GB (H200); int64 max is ~9.2 EB. Overflow is impossible.
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:      new(gpuMetricNameGPUMemoryUsed),
+			MetricValueLong: &v,
+			Unit:            new(gpuMetricUnitBytes),
 		})
 	}
 	if m.PowerDraw != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUPowerDraw),
+			MetricName:        new(gpuMetricNameGPUPowerDraw),
 			MetricValueDouble: m.PowerDraw,
-			Unit:              strPtr(gpuMetricUnitNone),
+			Unit:              new(gpuMetricUnitNone),
 		})
 	}
 	if m.Temperature != nil {
 		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-			MetricName:        strPtr(gpuMetricNameGPUTemperature),
+			MetricName:        new(gpuMetricNameGPUTemperature),
 			MetricValueDouble: m.Temperature,
-			Unit:              strPtr(gpuMetricUnitNone),
+			Unit:              new(gpuMetricUnitNone),
 		})
 	}
 	if len(generalMetrics) == 0 {
 		return nil
 	}
 
+	// Always include RESTART_APP XID count so customers see 0 instead of "No Data".
 	xidCount := m.RestartAppXidCount
 	generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
-		MetricName:      strPtr(gpuMetricNameGPURestartAppXidCount),
+		MetricName:      new(gpuMetricNameGPURestartAppXidCount),
 		MetricValueLong: &xidCount,
-		Unit:            strPtr(gpuMetricUnitCount),
+		Unit:            new(gpuMetricUnitCount),
 	})
 
-	uuid := m.GPUUUID
 	return &ecstcs.GeneralMetricsWrapper{
 		Dimensions: []*ecstcs.Dimension{
 			{
-				Key:   strPtr(gpuDeviceDimensionKey),
-				Value: &uuid,
+				Key:   new(gpuDeviceDimensionKey),
+				Value: new(m.GPUUUID),
 			},
 		},
 		GeneralMetrics: generalMetrics,
 	}
 }
 
-// GPUMetricsToInstancePayload converts a slice of GPUMetrics to instance-level
+// gpuMetricsToInstancePayload converts a slice of GPUMetrics to instance-level
 // GeneralMetricsWrapper entries containing InstanceGPULimit and InstanceGPUUsageTotal.
-func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
+// The usageTotal parameter is the pre-computed count of unique GPU device IDs assigned
+// to running task containers. Returns nil if the input slice is empty.
+func gpuMetricsToInstancePayload(metrics []dcgm.GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 {
 		return nil
 	}
@@ -108,27 +117,58 @@ func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstc
 		{
 			GeneralMetrics: []*ecstcs.GeneralMetric{
 				{
-					MetricName:      strPtr(gpuMetricNameInstanceGPULimitCount),
+					MetricName:      new(gpuMetricNameInstanceGPULimitCount),
 					MetricValueLong: &limitCount,
-					Unit:            strPtr(gpuMetricUnitCount),
+					Unit:            new(gpuMetricUnitCount),
 				},
 				{
-					MetricName:      strPtr(gpuMetricNameInstanceGPUUsageTotal),
+					MetricName:      new(gpuMetricNameInstanceGPUUsageTotal),
 					MetricValueLong: &usageTotal,
-					Unit:            strPtr(gpuMetricUnitCount),
+					Unit:            new(gpuMetricUnitCount),
 				},
 			},
 		},
 	}
 }
 
-// GPUMetricsForContainer returns the GeneralMetricsWrapper entries for a specific
-// container based on its assigned GPU device IDs.
-func GPUMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstcs.GeneralMetricsWrapper {
+// extractInstanceGPUPayloadValues extracts InstanceGPULimit and InstanceGPUUsageTotal
+// values from a GeneralMetricsWrapper slice produced by gpuMetricsToInstancePayload.
+// Returns ok=false if the payload structure is unexpected.
+func extractInstanceGPUPayloadValues(payload []*ecstcs.GeneralMetricsWrapper) (limit int64, usage int64, ok bool) {
+	if len(payload) == 0 {
+		return 0, 0, false
+	}
+	wrapper := payload[0]
+	if wrapper == nil || len(wrapper.GeneralMetrics) == 0 {
+		return 0, 0, false
+	}
+
+	var foundLimit, foundUsage bool
+	for _, gm := range wrapper.GeneralMetrics {
+		if gm.MetricName == nil || gm.MetricValueLong == nil {
+			continue
+		}
+		switch *gm.MetricName {
+		case gpuMetricNameInstanceGPULimitCount:
+			limit = *gm.MetricValueLong
+			foundLimit = true
+		case gpuMetricNameInstanceGPUUsageTotal:
+			usage = *gm.MetricValueLong
+			foundUsage = true
+		}
+	}
+	return limit, usage, foundLimit && foundUsage
+}
+
+// gpuMetricsForContainer returns the GeneralMetricsWrapper entries for a specific
+// container based on its assigned GPU device IDs. It matches GPUMetric GPUUUID
+// against the provided device ID list.
+func gpuMetricsForContainer(metrics []dcgm.GPUMetric, gpuDeviceIDs []string) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 || len(gpuDeviceIDs) == 0 {
 		return nil
 	}
 
+	// Build a set of device IDs for O(1) lookup.
 	deviceIDSet := make(map[string]struct{}, len(gpuDeviceIDs))
 	for _, id := range gpuDeviceIDs {
 		deviceIDSet[id] = struct{}{}
@@ -139,7 +179,7 @@ func GPUMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstc
 		if _, ok := deviceIDSet[m.GPUUUID]; !ok {
 			continue
 		}
-		wrapper := GPUMetricToGeneralMetricsWrapper(m)
+		wrapper := gpuMetricToGeneralMetricsWrapper(m)
 		if wrapper != nil {
 			result = append(result, wrapper)
 		}
@@ -147,3 +187,4 @@ func GPUMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstc
 
 	return result
 }
+

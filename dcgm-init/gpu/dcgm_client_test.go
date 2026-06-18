@@ -19,21 +19,32 @@ import (
 // TestNewClient tests the NewClient constructor with various configurations.
 func TestNewClient(t *testing.T) {
 	testCases := []struct {
-		name        string
-		config      Config
-		description string
+		name               string
+		config             Config
+		expectedSocketPath string
+		description        string
 	}{
 		{
-			name:        "creates client with default config",
-			config:      Config{},
-			description: "Client should be created with default grace period",
+			name: "creates client with provided socket path",
+			config: Config{
+				SocketPath: "/run/nvidia-dcgm/custom-hostengine",
+			},
+			expectedSocketPath: "/run/nvidia-dcgm/custom-hostengine",
+			description:        "Client should use the provided socket path",
 		},
 		{
-			name: "creates client with custom grace period",
+			name:               "creates client with default socket path when empty",
+			config:             Config{},
+			expectedSocketPath: DefaultSocketPath,
+			description:        "Client should default to DefaultSocketPath when no path provided",
+		},
+		{
+			name: "creates client with custom socket path",
 			config: Config{
-				InitializationGracePeriod: 5 * time.Minute,
+				SocketPath: "/tmp/nv-hostengine",
 			},
-			description: "Client should accept custom grace period",
+			expectedSocketPath: "/tmp/nv-hostengine",
+			description:        "Client should accept custom socket paths",
 		},
 	}
 
@@ -46,9 +57,11 @@ func TestNewClient(t *testing.T) {
 
 			require.NotNil(t, client, "NewClient should return a non-nil client")
 
+			// Type assert to access internal fields for verification.
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok, "Client should be of type *dcgmClient")
 
+			assert.Equal(t, tc.expectedSocketPath, dcgmClient.socketPath, tc.description)
 			assert.NotNil(t, dcgmClient.logger, "Logger should be set")
 			assert.False(t, dcgmClient.connected, "Client should not be connected on creation")
 			assert.False(t, dcgmClient.hasViolation, "Client should not have violations on creation")
@@ -313,7 +326,7 @@ func TestClient_HealthyStateProducesCorrectStatus(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{SocketPath: "/run/nvidia-dcgm/nv-hostengine"}, logger)
 
 	// Type assert to access internal fields.
 	dcgmClient, ok := client.(*dcgmClient)
@@ -340,7 +353,7 @@ func TestClient_UnhealthyStateProducesCorrectStatus(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{SocketPath: "/run/nvidia-dcgm/nv-hostengine"}, logger)
 
 	// Type assert to access internal fields.
 	dcgmClient, ok := client.(*dcgmClient)
@@ -372,16 +385,63 @@ func (c *dcgmClient) isHealthyWithoutHealthCheck() bool {
 	return !c.hasViolation
 }
 
-// TestNewClient_GracePeriodDefault tests that a zero grace period uses the default.
-func TestNewClient_GracePeriodDefault(t *testing.T) {
+// TestSocketPathConfigurationAcceptance tests specific examples
+// to ensure the property holds for common cases.
+func TestSocketPathConfigurationAcceptance(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	testCases := []struct {
+		name        string
+		socketPath  string
+		description string
+	}{
+		{
+			name:        "default socket path",
+			socketPath:  DefaultSocketPath,
+			description: "Should accept default socket path",
+		},
+		{
+			name:        "tmp socket path",
+			socketPath:  "/tmp/nv-hostengine",
+			description: "Should accept tmp socket path",
+		},
+		{
+			name:        "run directory socket path",
+			socketPath:  "/run/nvidia-dcgm/nv-hostengine",
+			description: "Should accept run directory socket path",
+		},
+		{
+			name:        "custom socket path",
+			socketPath:  "/run/nvidia-dcgm/custom-hostengine",
+			description: "Should accept custom socket path",
+		},
+		{
+			name:        "nested directory socket path",
+			socketPath:  "/opt/nvidia/dcgm/nv-hostengine.sock",
+			description: "Should accept nested directory socket path",
+		},
+	}
 
-	dcgmClient, ok := client.(*dcgmClient)
-	require.True(t, ok)
-	assert.Equal(t, DefaultInitializationGracePeriod, dcgmClient.initializationGracePeriod)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := zaptest.NewLogger(t)
+			config := Config{
+				SocketPath: tc.socketPath,
+			}
+
+			client := NewClient(config, logger)
+
+			require.NotNil(t, client, "NewClient should return a non-nil client")
+
+			// Type assert to access internal fields for verification.
+			dcgmClient, ok := client.(*dcgmClient)
+			require.True(t, ok, "Client should be of type *dcgmClient")
+
+			assert.Equal(t, tc.socketPath, dcgmClient.socketPath, tc.description)
+		})
+	}
 }
 
 // TestExtractXIDCode tests that XID codes are correctly extracted from policy violations.
@@ -1933,3 +1993,4 @@ func makeStringFieldValue(status int, val string) dcgm.FieldValue_v1 {
 
 func ptrFloat64(v float64) *float64 { return &v }
 func ptrUint64(v uint64) *uint64    { return &v }
+

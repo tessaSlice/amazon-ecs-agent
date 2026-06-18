@@ -11,294 +11,529 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGPUMetricToGeneralMetricsWrapper_AllFields(t *testing.T) {
-	metric := GPUMetric{
-		GPUUUID:            "GPU-abc-123",
-		GPUUtilization:     ptrFloat64(85.0),
-		MemoryUtilization:  ptrFloat64(50.0),
-		MemoryTotal:        ptrUint64(16106127360),
-		MemoryUsed:         ptrUint64(8053063680),
-		PowerDraw:          ptrFloat64(250.5),
-		Temperature:        ptrFloat64(72.0),
-		RestartAppXidCount: 3,
-	}
+func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
+	t.Parallel()
 
-	wrapper := GPUMetricToGeneralMetricsWrapper(metric)
-
-	require.NotNil(t, wrapper)
-	require.Len(t, wrapper.Dimensions, 1)
-	assert.Equal(t, "AcceleratedDevice", *wrapper.Dimensions[0].Key)
-	assert.Equal(t, "GPU-abc-123", *wrapper.Dimensions[0].Value)
-
-	// Should have 6 metrics: utilization, mem_util, mem_total, power, temp, xid_count
-	require.Len(t, wrapper.GeneralMetrics, 6)
-
-	metricMap := make(map[string]interface{})
-	for _, gm := range wrapper.GeneralMetrics {
-		if gm.MetricValueDouble != nil {
-			metricMap[*gm.MetricName] = *gm.MetricValueDouble
-		} else if gm.MetricValueLong != nil {
-			metricMap[*gm.MetricName] = *gm.MetricValueLong
-		}
-	}
-
-	assert.Equal(t, 85.0, metricMap["GPUUtilization"])
-	assert.Equal(t, 50.0, metricMap["GPUMemoryUtilization"])
-	assert.Equal(t, int64(16106127360), metricMap["GPUMemoryTotal"])
-	assert.Equal(t, 250.5, metricMap["GPUPowerDraw"])
-	assert.Equal(t, 72.0, metricMap["GPUTemperature"])
-	assert.Equal(t, int64(3), metricMap["GPURestartAppXidCount"])
-}
-
-func TestGPUMetricToGeneralMetricsWrapper_NilFields_FractionalGPU(t *testing.T) {
-	// Fractional vGPUs (g6f) don't report power or temperature
-	metric := GPUMetric{
-		GPUUUID:            "GPU-fractional",
-		GPUUtilization:     ptrFloat64(0.0),
-		MemoryUtilization:  ptrFloat64(7.5),
-		MemoryTotal:        ptrUint64(6442450944),
-		MemoryUsed:         ptrUint64(0),
-		PowerDraw:          nil,
-		Temperature:        nil,
-		RestartAppXidCount: 0,
-	}
-
-	wrapper := GPUMetricToGeneralMetricsWrapper(metric)
-
-	require.NotNil(t, wrapper)
-	// Should have 4 metrics: utilization, mem_util, mem_total, xid_count (no power, no temp)
-	require.Len(t, wrapper.GeneralMetrics, 4)
-
-	metricNames := make(map[string]bool)
-	for _, gm := range wrapper.GeneralMetrics {
-		metricNames[*gm.MetricName] = true
-	}
-
-	assert.True(t, metricNames["GPUUtilization"])
-	assert.True(t, metricNames["GPUMemoryUtilization"])
-	assert.True(t, metricNames["GPUMemoryTotal"])
-	assert.True(t, metricNames["GPURestartAppXidCount"])
-	assert.False(t, metricNames["GPUPowerDraw"], "Power should not be emitted for fractional vGPU")
-	assert.False(t, metricNames["GPUTemperature"], "Temperature should not be emitted for fractional vGPU")
-}
-
-func TestGPUMetricToGeneralMetricsWrapper_AllNilFields(t *testing.T) {
-	metric := GPUMetric{
-		GPUUUID: "GPU-empty",
-	}
-
-	wrapper := GPUMetricToGeneralMetricsWrapper(metric)
-	assert.Nil(t, wrapper, "All-nil metrics should return nil wrapper")
-}
-
-func TestGPUMetricToGeneralMetricsWrapper_Units(t *testing.T) {
-	metric := GPUMetric{
-		GPUUUID:            "GPU-units-test",
-		GPUUtilization:     ptrFloat64(50.0),
-		MemoryUtilization:  ptrFloat64(25.0),
-		MemoryTotal:        ptrUint64(1024),
-		MemoryUsed:         ptrUint64(512),
-		PowerDraw:          ptrFloat64(100.0),
-		Temperature:        ptrFloat64(60.0),
-		RestartAppXidCount: 1,
-	}
-
-	wrapper := GPUMetricToGeneralMetricsWrapper(metric)
-	require.NotNil(t, wrapper)
-
-	unitMap := make(map[string]string)
-	for _, gm := range wrapper.GeneralMetrics {
-		unitMap[*gm.MetricName] = *gm.Unit
-	}
-
-	assert.Equal(t, "Percent", unitMap["GPUUtilization"])
-	assert.Equal(t, "Percent", unitMap["GPUMemoryUtilization"])
-	assert.Equal(t, "Bytes", unitMap["GPUMemoryTotal"])
-	assert.Equal(t, "None", unitMap["GPUPowerDraw"])
-	assert.Equal(t, "None", unitMap["GPUTemperature"])
-	assert.Equal(t, "Count", unitMap["GPURestartAppXidCount"])
-}
-
-func TestGPUMetricsToInstancePayload(t *testing.T) {
-	metrics := []GPUMetric{
-		{GPUUUID: "GPU-0"},
-		{GPUUUID: "GPU-1"},
-		{GPUUUID: "GPU-2"},
-		{GPUUUID: "GPU-3"},
-	}
-
-	payload := GPUMetricsToInstancePayload(metrics, 2)
-
-	require.NotNil(t, payload)
-	require.Len(t, payload, 1)
-	require.Len(t, payload[0].GeneralMetrics, 2)
-
-	metricMap := make(map[string]int64)
-	for _, gm := range payload[0].GeneralMetrics {
-		metricMap[*gm.MetricName] = *gm.MetricValueLong
-	}
-
-	assert.Equal(t, int64(4), metricMap["InstanceGPULimit"], "Should report total GPU count")
-	assert.Equal(t, int64(2), metricMap["InstanceGPUUsageTotal"], "Should report GPUs in use")
-}
-
-func TestGPUMetricsToInstancePayload_Empty(t *testing.T) {
-	payload := GPUMetricsToInstancePayload(nil, 0)
-	assert.Nil(t, payload)
-
-	payload = GPUMetricsToInstancePayload([]GPUMetric{}, 0)
-	assert.Nil(t, payload)
-}
-
-func TestGPUMetricsForContainer_MatchesByUUID(t *testing.T) {
-	metrics := []GPUMetric{
-		{GPUUUID: "GPU-0", GPUUtilization: ptrFloat64(100.0), Temperature: ptrFloat64(70.0)},
-		{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0), Temperature: ptrFloat64(60.0)},
-		{GPUUUID: "GPU-2", GPUUtilization: ptrFloat64(25.0), Temperature: ptrFloat64(50.0)},
-		{GPUUUID: "GPU-3", GPUUtilization: ptrFloat64(0.0), Temperature: ptrFloat64(40.0)},
-	}
-
-	// Container has GPUs 1 and 3 assigned
-	result := GPUMetricsForContainer(metrics, []string{"GPU-1", "GPU-3"})
-
-	require.Len(t, result, 2)
-	// Verify we got the right GPUs by checking dimensions
-	uuids := make([]string, len(result))
-	for i, wrapper := range result {
-		uuids[i] = *wrapper.Dimensions[0].Value
-	}
-	assert.Contains(t, uuids, "GPU-1")
-	assert.Contains(t, uuids, "GPU-3")
-}
-
-func TestGPUMetricsForContainer_NoMatchingGPUs(t *testing.T) {
-	metrics := []GPUMetric{
-		{GPUUUID: "GPU-0", GPUUtilization: ptrFloat64(100.0)},
-		{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(50.0)},
-	}
-
-	result := GPUMetricsForContainer(metrics, []string{"GPU-99"})
-	assert.Nil(t, result)
-}
-
-func TestGPUMetricsForContainer_EmptyInputs(t *testing.T) {
-	assert.Nil(t, GPUMetricsForContainer(nil, []string{"GPU-0"}))
-	assert.Nil(t, GPUMetricsForContainer([]GPUMetric{}, []string{"GPU-0"}))
-	assert.Nil(t, GPUMetricsForContainer([]GPUMetric{{GPUUUID: "GPU-0"}}, nil))
-	assert.Nil(t, GPUMetricsForContainer([]GPUMetric{{GPUUUID: "GPU-0"}}, []string{}))
-}
-
-func TestGPUMetricsForContainer_SingleGPU(t *testing.T) {
-	metrics := []GPUMetric{
+	testCases := []struct {
+		name              string
+		metric            dcgm.GPUMetric
+		expectNil         bool
+		expectedCount     int
+		expectedDimValue  string
+		expectedNames     []string
+		expectedUnits     []string
+		expectedIsDoubles []bool
+	}{
 		{
-			GPUUUID:            "GPU-single",
-			GPUUtilization:     ptrFloat64(99.0),
-			MemoryUtilization:  ptrFloat64(80.0),
-			MemoryTotal:        ptrUint64(16106127360),
-			MemoryUsed:         ptrUint64(12884901888),
-			PowerDraw:          ptrFloat64(300.0),
-			Temperature:        ptrFloat64(85.0),
-			RestartAppXidCount: 2,
+			name: "all fields populated",
+			metric: dcgm.GPUMetric{
+				GPUUUID:           "GPU-abc-123",
+				GPUUtilization:    aws.Float64(75.5),
+				MemoryUtilization: aws.Float64(60.0),
+				MemoryTotal:       uint64Ptr(8589934592),
+				MemoryUsed:        uint64Ptr(4294967296),
+				PowerDraw:         aws.Float64(250.0),
+				Temperature:       aws.Float64(72.0),
+			},
+			expectNil:        false,
+			expectedCount:    7,
+			expectedDimValue: "GPU-abc-123",
+			expectedNames: []string{
+				"GPUUtilization", "GPUMemoryUtilization", "GPUMemoryTotal",
+				"GPUMemoryUsed", "GPUPowerDraw", "GPUTemperature", "GPURestartAppXidCount",
+			},
+			expectedUnits: []string{
+				"Percent", "Percent", "Bytes", "Bytes", "None", "None", "Count",
+			},
+			expectedIsDoubles: []bool{true, true, false, false, true, true, false},
+		},
+		{
+			name: "all fields nil",
+			metric: dcgm.GPUMetric{
+				GPUUUID: "GPU-nil-all",
+			},
+			expectNil: true,
+		},
+		{
+			name: "only GPUUtilization set",
+			metric: dcgm.GPUMetric{
+				GPUUUID:        "GPU-single-util",
+				GPUUtilization: aws.Float64(42.0),
+			},
+			expectNil:         false,
+			expectedCount:     2,
+			expectedDimValue:  "GPU-single-util",
+			expectedNames:     []string{"GPUUtilization", "GPURestartAppXidCount"},
+			expectedUnits:     []string{"Percent", "Count"},
+			expectedIsDoubles: []bool{true, false},
+		},
+		{
+			name: "only integer fields set",
+			metric: dcgm.GPUMetric{
+				GPUUUID:     "GPU-int-only",
+				MemoryTotal: uint64Ptr(16000000000),
+				MemoryUsed:  uint64Ptr(8000000000),
+			},
+			expectNil:         false,
+			expectedCount:     3,
+			expectedDimValue:  "GPU-int-only",
+			expectedNames:     []string{"GPUMemoryTotal", "GPUMemoryUsed", "GPURestartAppXidCount"},
+			expectedUnits:     []string{"Bytes", "Bytes", "Count"},
+			expectedIsDoubles: []bool{false, false, false},
+		},
+		{
+			name: "mixed nil and non-nil fields",
+			metric: dcgm.GPUMetric{
+				GPUUUID:           "GPU-mixed",
+				GPUUtilization:    aws.Float64(90.0),
+				MemoryUtilization: nil,
+				MemoryTotal:       uint64Ptr(1024),
+				MemoryUsed:        nil,
+				PowerDraw:         aws.Float64(100.0),
+				Temperature:       nil,
+			},
+			expectNil:         false,
+			expectedCount:     4,
+			expectedDimValue:  "GPU-mixed",
+			expectedNames:     []string{"GPUUtilization", "GPUMemoryTotal", "GPUPowerDraw", "GPURestartAppXidCount"},
+			expectedUnits:     []string{"Percent", "Bytes", "None", "Count"},
+			expectedIsDoubles: []bool{true, false, true, false},
+		},
+		{
+			name: "empty GPUUUID with fields populated",
+			metric: dcgm.GPUMetric{
+				GPUUUID:        "",
+				GPUUtilization: aws.Float64(10.0),
+			},
+			expectNil:         false,
+			expectedCount:     2,
+			expectedDimValue:  "",
+			expectedNames:     []string{"GPUUtilization", "GPURestartAppXidCount"},
+			expectedUnits:     []string{"Percent", "Count"},
+			expectedIsDoubles: []bool{true, false},
+		},
+		{
+			name: "zero values for all fields",
+			metric: dcgm.GPUMetric{
+				GPUUUID:           "GPU-zeros",
+				GPUUtilization:    aws.Float64(0),
+				MemoryUtilization: aws.Float64(0),
+				MemoryTotal:       uint64Ptr(0),
+				MemoryUsed:        uint64Ptr(0),
+				PowerDraw:         aws.Float64(0),
+				Temperature:       aws.Float64(0),
+			},
+			expectNil:        false,
+			expectedCount:    7,
+			expectedDimValue: "GPU-zeros",
+			expectedNames: []string{
+				"GPUUtilization", "GPUMemoryUtilization", "GPUMemoryTotal",
+				"GPUMemoryUsed", "GPUPowerDraw", "GPUTemperature", "GPURestartAppXidCount",
+			},
+			expectedUnits:     []string{"Percent", "Percent", "Bytes", "Bytes", "None", "None", "Count"},
+			expectedIsDoubles: []bool{true, true, false, false, true, true, false},
 		},
 	}
 
-	result := GPUMetricsForContainer(metrics, []string{"GPU-single"})
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Len(t, result, 1)
-	assert.Equal(t, "GPU-single", *result[0].Dimensions[0].Value)
-	// 6 metrics: util, mem_util, mem_total, power, temp, xid_count
-	assert.Len(t, result[0].GeneralMetrics, 6)
-}
+			result := gpuMetricToGeneralMetricsWrapper(tc.metric)
 
-// TestGPUMetricNames_MatchTACSAllowlist verifies that the metric names emitted
-// by dcgm-init match the TACS ALLOWED_GENERAL_METRIC_NAMES allowlist.
-// Reference: MadisonTelemetryAgentCommunicationService
-func TestGPUMetricNames_MatchTACSAllowlist(t *testing.T) {
-	// These are the exact names from the TACS allowlist
-	tacsAllowedNames := map[string]bool{
-		"GPUUtilization":           true,
-		"GPUMemoryUtilization":     true,
-		"GPUMemoryTotal":           true,
-		"GPUPowerDraw":             true,
-		"GPUTemperature":           true,
-		"GPUTensorCoreUtilization": true,
-		"GPURestartAppXidCount":    true,
-		"SPUSMActive":              true,
-		"InstanceGPULimit":         true,
-		"InstanceGPUUsageTotal":    true,
+			if tc.expectNil {
+				assert.Nil(t, result, "Expected nil wrapper when all fields are nil.")
+				return
+			}
+
+			require.NotNil(t, result, "Expected non-nil wrapper.")
+
+			// Verify dimension.
+			require.Len(t, result.Dimensions, 1, "Expected exactly one dimension.")
+			assert.Equal(t, "AcceleratedDevice", *result.Dimensions[0].Key)
+			assert.Equal(t, tc.expectedDimValue, *result.Dimensions[0].Value)
+
+			// Verify metric count.
+			require.Len(t, result.GeneralMetrics, tc.expectedCount, "Unexpected number of GeneralMetric entries.")
+
+			// Verify each metric name, unit, and value type.
+			for i, gm := range result.GeneralMetrics {
+				assert.Equal(t, tc.expectedNames[i], *gm.MetricName, "Metric name mismatch at index %d.", i)
+				assert.Equal(t, tc.expectedUnits[i], *gm.Unit, "Unit mismatch at index %d.", i)
+				if tc.expectedIsDoubles[i] {
+					assert.NotNil(t, gm.MetricValueDouble, "Expected MetricValueDouble at index %d.", i)
+					assert.Nil(t, gm.MetricValueLong, "Expected nil MetricValueLong for double metric at index %d.", i)
+				} else {
+					assert.NotNil(t, gm.MetricValueLong, "Expected MetricValueLong at index %d.", i)
+					assert.Nil(t, gm.MetricValueDouble, "Expected nil MetricValueDouble for integer metric at index %d.", i)
+				}
+			}
+		})
 	}
-
-	// Verify our emitted constants are all in the allowlist
-	assert.True(t, tacsAllowedNames[gpuMetricNameGPUUtilization])
-	assert.True(t, tacsAllowedNames[gpuMetricNameGPUMemoryUtilization])
-	assert.True(t, tacsAllowedNames[gpuMetricNameGPUMemoryTotal])
-	assert.True(t, tacsAllowedNames[gpuMetricNameGPUPowerDraw])
-	assert.True(t, tacsAllowedNames[gpuMetricNameGPUTemperature])
-	assert.True(t, tacsAllowedNames[gpuMetricNameGPURestartAppXidCount])
-	assert.True(t, tacsAllowedNames[gpuMetricNameInstanceGPULimitCount])
-	assert.True(t, tacsAllowedNames[gpuMetricNameInstanceGPUUsageTotal])
 }
 
-// TestGPUMetrics_EndToEnd_PublishFlow simulates the full flow:
-// dcgm-init writes file -> handler reads -> conversion -> TACS payload ready
-func TestGPUMetrics_EndToEnd_PublishFlow(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+func TestGpuMetricsToInstancePayload(t *testing.T) {
+	t.Parallel()
 
-	// Simulate dcgm-init writing metrics (as it would on a g4dn.12xlarge under load)
-	data := GPUMetricsFileData{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
-			{
-				GPUUUID:            "GPU-aaaa-1111",
-				GPUUtilization:     ptrFloat64(100.0),
-				MemoryUtilization:  ptrFloat64(45.0),
-				MemoryTotal:        ptrUint64(16106127360),
-				MemoryUsed:         ptrUint64(7247757312),
-				PowerDraw:          ptrFloat64(70.5),
-				Temperature:        ptrFloat64(58.0),
-				RestartAppXidCount: 0,
-			},
-			{
-				GPUUUID:            "GPU-bbbb-2222",
-				GPUUtilization:     ptrFloat64(95.0),
-				MemoryUtilization:  ptrFloat64(30.0),
-				MemoryTotal:        ptrUint64(16106127360),
-				MemoryUsed:         ptrUint64(4831838208),
-				PowerDraw:          ptrFloat64(68.0),
-				Temperature:        ptrFloat64(55.0),
-				RestartAppXidCount: 0,
-			},
+	testCases := []struct {
+		name          string
+		metrics       []dcgm.GPUMetric
+		usageTotal    int64
+		expectNil     bool
+		expectedLimit int64
+		expectedUsage int64
+	}{
+		{
+			name:      "empty slice returns nil",
+			metrics:   []dcgm.GPUMetric{},
+			expectNil: true,
 		},
-		Healthy: true,
+		{
+			name:      "nil slice returns nil",
+			metrics:   nil,
+			expectNil: true,
+		},
+		{
+			name: "single device with usage total 1",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+			},
+			usageTotal:    1,
+			expectNil:     false,
+			expectedLimit: 1,
+			expectedUsage: 1,
+		},
+		{
+			name: "multiple devices with usage total matching count",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+				{GPUUUID: "GPU-3", MemoryTotal: uint64Ptr(8000)},
+			},
+			usageTotal:    3,
+			expectNil:     false,
+			expectedLimit: 3,
+			expectedUsage: 3,
+		},
+		{
+			name: "usage total less than device count",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2"},
+				{GPUUUID: "GPU-3", Temperature: aws.Float64(70.0)},
+				{GPUUUID: "GPU-4"},
+			},
+			usageTotal:    2,
+			expectNil:     false,
+			expectedLimit: 4,
+			expectedUsage: 2,
+		},
+		{
+			name: "usage total zero",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1"},
+				{GPUUUID: "GPU-2"},
+			},
+			usageTotal:    0,
+			expectNil:     false,
+			expectedLimit: 2,
+			expectedUsage: 0,
+		},
+		{
+			name: "eight devices with usage total 5",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1"}, {GPUUUID: "GPU-2"}, {GPUUUID: "GPU-3"}, {GPUUUID: "GPU-4"},
+				{GPUUUID: "GPU-5"}, {GPUUUID: "GPU-6"}, {GPUUUID: "GPU-7"}, {GPUUUID: "GPU-8"},
+			},
+			usageTotal:    5,
+			expectNil:     false,
+			expectedLimit: 8,
+			expectedUsage: 5,
+		},
 	}
-	writeMetricsFile(t, filePath, data)
 
-	// Step 1: Handler reads the file (simulates agent reading from bind mount)
-	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
-	require.Len(t, metrics, 2, "Handler should read 2 GPUs from the shared file")
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Step 2: Convert to container-level payload (container has GPU-aaaa-1111 assigned)
-	containerPayload := GPUMetricsForContainer(metrics, []string{"GPU-aaaa-1111"})
-	require.Len(t, containerPayload, 1, "Container should have 1 GPU wrapper")
-	assert.Equal(t, "GPU-aaaa-1111", *containerPayload[0].Dimensions[0].Value)
-	assert.Len(t, containerPayload[0].GeneralMetrics, 6, "Should have all 6 metrics for full GPU")
+			result := gpuMetricsToInstancePayload(tc.metrics, tc.usageTotal)
 
-	// Step 3: Convert to instance-level payload
-	instancePayload := GPUMetricsToInstancePayload(metrics, 1) // 1 GPU assigned to tasks
-	require.Len(t, instancePayload, 1)
-	require.Len(t, instancePayload[0].GeneralMetrics, 2)
+			if tc.expectNil {
+				assert.Nil(t, result, "Expected nil payload for empty input.")
+				return
+			}
 
-	var limit, usage int64
-	for _, gm := range instancePayload[0].GeneralMetrics {
-		switch *gm.MetricName {
-		case "InstanceGPULimit":
-			limit = *gm.MetricValueLong
-		case "InstanceGPUUsageTotal":
-			usage = *gm.MetricValueLong
-		}
+			require.NotNil(t, result, "Expected non-nil payload.")
+			require.Len(t, result, 1, "Expected exactly one wrapper.")
+
+			wrapper := result[0]
+			require.Len(t, wrapper.GeneralMetrics, 2, "Expected two instance-level metrics.")
+
+			// Find metrics by name.
+			var limitMetric, usageMetric *struct {
+				name  string
+				value int64
+				unit  string
+			}
+			for _, gm := range wrapper.GeneralMetrics {
+				require.NotNil(t, gm.MetricName)
+				require.NotNil(t, gm.MetricValueLong)
+				require.NotNil(t, gm.Unit)
+				switch *gm.MetricName {
+				case "InstanceGPULimit":
+					limitMetric = &struct {
+						name  string
+						value int64
+						unit  string
+					}{*gm.MetricName, *gm.MetricValueLong, *gm.Unit}
+				case "InstanceGPUUsageTotal":
+					usageMetric = &struct {
+						name  string
+						value int64
+						unit  string
+					}{*gm.MetricName, *gm.MetricValueLong, *gm.Unit}
+				}
+			}
+
+			require.NotNil(t, limitMetric, "InstanceGPULimit metric not found.")
+			require.NotNil(t, usageMetric, "InstanceGPUUsageTotal metric not found.")
+
+			assert.Equal(t, tc.expectedLimit, limitMetric.value, "InstanceGPULimit mismatch.")
+			assert.Equal(t, "Count", limitMetric.unit)
+
+			assert.Equal(t, tc.expectedUsage, usageMetric.value, "InstanceGPUUsageTotal mismatch.")
+			assert.Equal(t, "Count", usageMetric.unit)
+		})
 	}
-	assert.Equal(t, int64(2), limit, "InstanceGPULimit should be 2 (total GPUs on instance)")
-	assert.Equal(t, int64(1), usage, "InstanceGPUUsageTotal should be 1 (GPUs assigned to tasks)")
 }
+
+func TestGpuMetricsForContainer(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		metrics       []dcgm.GPUMetric
+		deviceIDs     []string
+		expectNil     bool
+		expectedUUIDs []string
+	}{
+		{
+			name:      "empty metrics returns nil",
+			metrics:   []dcgm.GPUMetric{},
+			deviceIDs: []string{"GPU-1"},
+			expectNil: true,
+		},
+		{
+			name: "empty device list returns nil",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+			},
+			deviceIDs: []string{},
+			expectNil: true,
+		},
+		{
+			name: "nil device list returns nil",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+			},
+			deviceIDs: nil,
+			expectNil: true,
+		},
+		{
+			name: "matching UUIDs returns correct wrappers",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+				{GPUUUID: "GPU-3", PowerDraw: aws.Float64(200.0)},
+			},
+			deviceIDs:     []string{"GPU-1", "GPU-3"},
+			expectNil:     false,
+			expectedUUIDs: []string{"GPU-1", "GPU-3"},
+		},
+		{
+			name: "no matching UUIDs returns nil",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+			},
+			deviceIDs: []string{"GPU-99", "GPU-100"},
+			expectNil: true,
+		},
+		{
+			name: "partial matches returns only matched",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+				{GPUUUID: "GPU-3", PowerDraw: aws.Float64(200.0)},
+			},
+			deviceIDs:     []string{"GPU-2", "GPU-99"},
+			expectNil:     false,
+			expectedUUIDs: []string{"GPU-2"},
+		},
+		{
+			name: "matching UUID but all nil fields returns nil",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1"}, // all nil fields
+			},
+			deviceIDs: []string{"GPU-1"},
+			expectNil: true,
+		},
+		{
+			name: "all UUIDs match",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", Temperature: aws.Float64(70.0)},
+			},
+			deviceIDs:     []string{"GPU-1", "GPU-2"},
+			expectNil:     false,
+			expectedUUIDs: []string{"GPU-1", "GPU-2"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := gpuMetricsForContainer(tc.metrics, tc.deviceIDs)
+
+			if tc.expectNil {
+				assert.Nil(t, result, "Expected nil result.")
+				return
+			}
+
+			require.NotNil(t, result, "Expected non-nil result.")
+			require.Len(t, result, len(tc.expectedUUIDs), "Unexpected number of wrappers.")
+
+			// Collect returned UUIDs.
+			var returnedUUIDs []string
+			for _, wrapper := range result {
+				require.Len(t, wrapper.Dimensions, 1)
+				assert.Equal(t, "AcceleratedDevice", *wrapper.Dimensions[0].Key)
+				returnedUUIDs = append(returnedUUIDs, *wrapper.Dimensions[0].Value)
+			}
+
+			assert.Equal(t, tc.expectedUUIDs, returnedUUIDs, "Returned UUIDs mismatch.")
+		})
+	}
+}
+
+// uint64Ptr is a helper to create a pointer to a uint64 value.
+func uint64Ptr(v uint64) *uint64 {
+	return &v
+}
+
+// TestExtractInstanceGPUPayloadValues verifies that extractInstanceGPUPayloadValues
+// correctly extracts InstanceGPULimit and InstanceGPUUsageTotal from payloads produced
+// by gpuMetricsToInstancePayload, and returns ok=false for invalid payloads.
+func TestExtractInstanceGPUPayloadValues(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		metrics       []dcgm.GPUMetric
+		usageTotal    int64
+		buildPayload  bool
+		rawPayload    []*ecstcs.GeneralMetricsWrapper
+		expectOK      bool
+		expectedLimit int64
+		expectedUsage int64
+	}{
+		{
+			name: "round-trip single device usage 1",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+			},
+			usageTotal:    1,
+			buildPayload:  true,
+			expectOK:      true,
+			expectedLimit: 1,
+			expectedUsage: 1,
+		},
+		{
+			name: "round-trip four devices usage 2",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1"}, {GPUUUID: "GPU-2"}, {GPUUUID: "GPU-3"}, {GPUUUID: "GPU-4"},
+			},
+			usageTotal:    2,
+			buildPayload:  true,
+			expectOK:      true,
+			expectedLimit: 4,
+			expectedUsage: 2,
+		},
+		{
+			name: "round-trip eight devices usage 0",
+			metrics: []dcgm.GPUMetric{
+				{GPUUUID: "GPU-1"}, {GPUUUID: "GPU-2"}, {GPUUUID: "GPU-3"}, {GPUUUID: "GPU-4"},
+				{GPUUUID: "GPU-5"}, {GPUUUID: "GPU-6"}, {GPUUUID: "GPU-7"}, {GPUUUID: "GPU-8"},
+			},
+			usageTotal:    0,
+			buildPayload:  true,
+			expectOK:      true,
+			expectedLimit: 8,
+			expectedUsage: 0,
+		},
+		{
+			name:         "nil payload returns ok false",
+			buildPayload: false,
+			rawPayload:   nil,
+			expectOK:     false,
+		},
+		{
+			name:         "empty payload returns ok false",
+			buildPayload: false,
+			rawPayload:   []*ecstcs.GeneralMetricsWrapper{},
+			expectOK:     false,
+		},
+		{
+			name:         "payload with nil wrapper returns ok false",
+			buildPayload: false,
+			rawPayload:   []*ecstcs.GeneralMetricsWrapper{nil},
+			expectOK:     false,
+		},
+		{
+			name:         "payload with empty metrics returns ok false",
+			buildPayload: false,
+			rawPayload: []*ecstcs.GeneralMetricsWrapper{
+				{GeneralMetrics: []*ecstcs.GeneralMetric{}},
+			},
+			expectOK: false,
+		},
+		{
+			name:         "payload with nil metric fields skips them and returns ok false",
+			buildPayload: false,
+			rawPayload: []*ecstcs.GeneralMetricsWrapper{
+				{GeneralMetrics: []*ecstcs.GeneralMetric{
+					{MetricName: nil, MetricValueLong: aws.Int64(1)},
+					{MetricName: aws.String("InstanceGPULimit"), MetricValueLong: nil},
+				}},
+			},
+			expectOK: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var payload []*ecstcs.GeneralMetricsWrapper
+			if tc.buildPayload {
+				payload = gpuMetricsToInstancePayload(tc.metrics, tc.usageTotal)
+				require.NotNil(t, payload)
+			} else {
+				payload = tc.rawPayload
+			}
+
+			limit, usage, ok := extractInstanceGPUPayloadValues(payload)
+
+			if !tc.expectOK {
+				assert.False(t, ok, "Expected ok=false for invalid payload.")
+				return
+			}
+
+			assert.True(t, ok, "Expected ok=true for valid payload.")
+			assert.Equal(t, tc.expectedLimit, limit, "InstanceGPULimit mismatch.")
+			assert.Equal(t, tc.expectedUsage, usage, "InstanceGPUUsageTotal mismatch.")
+		})
+	}
+}
+

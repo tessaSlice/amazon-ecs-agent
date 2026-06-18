@@ -205,7 +205,7 @@ type Client interface {
 
 // Config holds configuration for the DCGM client.
 type Config struct {
-	// SocketPath is the Unix domain socket path for the nv-hostengine.
+	// SocketPath is the Unix domain socket path for the nv-hostengine (e.g., "/run/nvidia-dcgm/nv-hostengine").
 	// If empty, defaults to DefaultSocketPath.
 	SocketPath string
 
@@ -218,7 +218,7 @@ type Config struct {
 
 // dcgmClient implements the Client interface.
 type dcgmClient struct {
-	// Unix domain socket path for nv-hostengine.
+	// Unix domain socket path for nv-hostengine (e.g., "/run/nvidia-dcgm/nv-hostengine").
 	socketPath string
 
 	// Grace period after shutdown before reporting initialization errors.
@@ -289,7 +289,6 @@ type dcgmClient struct {
 }
 
 // NewClient creates a new DCGM client with the given configuration.
-// The client connects to nv-hostengine via Unix domain socket (no TCP ports).
 func NewClient(config Config, logger *zap.Logger) Client {
 	socketPath := config.SocketPath
 	if socketPath == "" {
@@ -360,21 +359,37 @@ func (c *dcgmClient) Reconcile(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// initializeLocked connects to nv-hostengine via Unix domain socket and sets up monitoring.
-// No TCP ports are opened — communication is strictly via the local socket.
+// initializeLocked connects to DCGM and sets up monitoring.
 // Caller must hold c.mu lock.
 func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	c.logger.Info("initializing DCGM client", zap.String("socketPath", c.socketPath))
 
 	// Check if there's already a pending initialization attempt to prevent unbounded go routine creation.
+	// We use CompareAndSwap to atomically check and increment, ensuring only one goroutine proceeds.
 	if !c.pendingInitAttempts.CompareAndSwap(0, 1) {
 		c.logger.Warn("initialization already in progress, skipping new attempt",
 			zap.Int32("pendingAttempts", c.pendingInitAttempts.Load()))
 		return fmt.Errorf("DCGM initialization already in progress")
 	}
 
-	// Connect to nv-hostengine via Unix domain socket. The "1" parameter indicates
-	// Unix domain socket mode (not TCP). No network ports are exposed.
+	// Initialize DCGM in standalone mode to connect to nv-hostengine.
+	// Use a timeout to prevent blocking indefinitely when host engine is unavailable.
+	c.logger.Debug("connecting to host engine", zap.String("socketPath", c.socketPath))
+
+	// dcgm.Init() is a blocking call that connects to nv-hostengine via Unix domain socket.
+	// The underlying NVIDIA DCGM C library does not support context cancellation or
+	// configurable timeouts. When nv-hostengine is unavailable, the connection
+	// attempt can block for extended periods.
+	//
+	// Our mitigation strategy is:
+	//   1. Run dcgm.Init() in a goroutine to avoid blocking the caller.
+	//   2. Use a 10-second timeout to fail fast when nv-hostengine is unavailable.
+	//   3. Track pending attempts with pendingInitAttempts atomic counter.
+	//   4. Limit to 1 concurrent attempt to prevent unbounded goroutine creation.
+	//
+	// This bounds the resource creation to a single goroutine that will eventually
+	// terminate. It's a local endpoint so it's very unlikely to take more than
+	// 10 seconds to succeed.
 	type initResult struct {
 		cleanup func()
 		err     error
@@ -382,11 +397,17 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	resultChan := make(chan initResult, 1)
 
 	go func() {
+		// Decrement counter when goroutine completes (success or failure).
 		defer c.pendingInitAttempts.Add(-1)
+
+		// The second parameter is the socket path and the third parameter "1" indicates
+		// Unix domain socket connection mode rather than TCP/IP. This connects to
+		// nv-hostengine via the specified Unix domain socket.
 		cleanup, err := dcgm.Init(dcgm.Standalone, c.socketPath, "1")
 		resultChan <- initResult{cleanup: cleanup, err: err}
 	}()
 
+	// Wait for initialization with timeout.
 	const initTimeout = 10 * time.Second
 	timeoutCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
@@ -394,22 +415,22 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	var result initResult
 	select {
 	case result = <-resultChan:
+		// Initialization completed.
 		if result.err != nil {
-			c.logger.Error("failed to connect to nv-hostengine",
+			c.logger.Error("failed to connect to host engine",
 				zap.String("socketPath", c.socketPath),
 				zap.Error(result.err))
 			return result.err
 		}
 	case <-timeoutCtx.Done():
-		c.logger.Error("timeout connecting to nv-hostengine",
+		c.logger.Error("timeout connecting to host engine",
 			zap.String("socketPath", c.socketPath),
 			zap.Duration("timeout", initTimeout))
 		return fmt.Errorf("timeout connecting to nv-hostengine after %v", initTimeout)
 	}
 
 	c.cleanupFunc = result.cleanup
-	c.logger.Info("successfully connected to nv-hostengine via Unix socket",
-		zap.String("socketPath", c.socketPath))
+	c.logger.Info("successfully connected to host engine")
 
 	// Create context for policy violation listener.
 	policyCtx, cancel := context.WithCancel(ctx)
@@ -419,26 +440,43 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 
 	// Register policy violation listeners for all required policies.
 	// These policies monitor critical GPU health indicators that signal hardware degradation or failure.
-	// Non-fatal: some vGPU configurations may not support policy registration.
 	c.logger.Info("registering policy violation listeners")
 	policyChan, err := dcgm.ListenForPolicyViolations(policyCtx,
+		// XidPolicy: GPU hardware exceptions (XID errors).
+		// Example: XID 48 indicates a double-bit ECC error, XID 79 means
+		// the GPU fell off the PCIe bus (often due to power issues or bad connection).
 		dcgm.XidPolicy,
 	)
 	if err != nil {
-		c.logger.Warn("failed to register policy listeners, health monitoring disabled", zap.Error(err))
-	} else {
-		c.logger.Info("successfully registered policy violation listeners")
-		c.policyViolationChan = policyChan
-		go c.listenForPolicyViolations()
+		c.logger.Error("failed to register policy listeners", zap.Error(err))
+		c.shutdownHandlers = nil
+		cancel()
+		if c.cleanupFunc != nil {
+			c.cleanupFunc()
+		}
+		return err
 	}
+	c.logger.Info("successfully registered policy violation listeners")
 
-	// Enable DCGM health check systems. Non-fatal: vGPUs may not support all health watches.
+	c.policyViolationChan = policyChan
+
+	// Enable all DCGM health check systems. We consider the instance to be unhealthy even if a GPU
+	// that is not in use is impaired. This prevents a situation where a task is launched and given
+	// an impaired GPU.
 	c.logger.Info("enabling health check systems for all GPUs")
 	if err := dcgm.HealthSet(dcgm.GroupAllGPUs(), dcgm.DCGM_HEALTH_WATCH_ALL); err != nil {
-		c.logger.Warn("failed to enable health check systems, health monitoring disabled", zap.Error(err))
-	} else {
-		c.logger.Info("successfully enabled health check systems")
+		c.logger.Error("failed to enable health check systems", zap.Error(err))
+		c.shutdownHandlers = nil
+		cancel()
+		if c.cleanupFunc != nil {
+			c.cleanupFunc()
+		}
+		return err
 	}
+	c.logger.Info("successfully enabled health check systems")
+
+	// Start goroutine to listen for policy violations.
+	go c.listenForPolicyViolations()
 
 	// Mark as connected. Note: We do NOT reset hasViolation here because
 	// policy violations should persist across DCGM reconnections. Once a GPU
@@ -1012,3 +1050,4 @@ func getXIDMessage(code uint64) string {
 	}
 	return "Unknown XID error"
 }
+

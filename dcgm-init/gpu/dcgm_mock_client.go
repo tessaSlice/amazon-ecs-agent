@@ -177,3 +177,4 @@ func (m *MockClient) GetMetricsCallCount() int {
 	defer m.mu.RUnlock()
 	return m.getMetricsCalls
 }
+
