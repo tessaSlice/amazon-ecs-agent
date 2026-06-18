@@ -135,7 +135,7 @@ func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstc
 // extractInstanceGPUPayloadValues extracts InstanceGPULimit and InstanceGPUUsageTotal
 // values from a GeneralMetricsWrapper slice produced by gpuMetricsToInstancePayload.
 // Returns ok=false if the payload structure is unexpected.
-func extractInstanceGPUPayloadValues(payload []*ecstcs.GeneralMetricsWrapper) (limit int64, usage int64, ok bool) {
+func ExtractInstanceGPUPayloadValues(payload []*ecstcs.GeneralMetricsWrapper) (limit int64, usage int64, ok bool) {
 	if len(payload) == 0 {
 		return 0, 0, false
 	}

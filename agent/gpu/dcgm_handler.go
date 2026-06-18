@@ -21,23 +21,12 @@ const (
 
 // GPUMetricsFileData represents the JSON structure written by dcgm-init.
 type GPUMetricsFileData struct {
-	Timestamp       string          `json:"timestamp"`
-	GPUs            []GPUMetricJSON `json:"gpus"`
-	Healthy         bool            `json:"healthy"`
-	UnhealthyReason string          `json:"unhealthy_reason,omitempty"`
+	Timestamp       string      `json:"timestamp"`
+	GPUs            []GPUMetric `json:"gpus"`
+	Healthy         bool        `json:"healthy"`
+	UnhealthyReason string      `json:"unhealthy_reason,omitempty"`
 }
 
-// GPUMetricJSON represents a single GPU's metrics as written by dcgm-init.
-type GPUMetricJSON struct {
-	GPUUUID            string   `json:"gpu_uuid"`
-	GPUUtilization     *float64 `json:"gpu_utilization_percent,omitempty"`
-	MemoryUtilization  *float64 `json:"memory_utilization_percent,omitempty"`
-	MemoryTotal        *uint64  `json:"memory_total_bytes,omitempty"`
-	MemoryUsed         *uint64  `json:"memory_used_bytes,omitempty"`
-	PowerDraw          *float64 `json:"power_draw_watts,omitempty"`
-	Temperature        *float64 `json:"temperature_celsius,omitempty"`
-	RestartAppXidCount int64    `json:"restart_app_xid_count"`
-}
 
 // DCGMHandler reads GPU metrics from the shared file written by dcgm-init
 // and provides them to the stats engine for TACS reporting.
@@ -92,34 +81,20 @@ func (h *DCGMHandler) GetGPUMetrics() []GPUMetric {
 		return h.lastMetrics
 	}
 
-	metrics := make([]GPUMetric, len(fileData.GPUs))
-	for i, g := range fileData.GPUs {
-		metrics[i] = GPUMetric{
-			GPUUUID:            g.GPUUUID,
-			GPUUtilization:     g.GPUUtilization,
-			MemoryUtilization:  g.MemoryUtilization,
-			MemoryTotal:        g.MemoryTotal,
-			MemoryUsed:         g.MemoryUsed,
-			PowerDraw:          g.PowerDraw,
-			Temperature:        g.Temperature,
-			RestartAppXidCount: g.RestartAppXidCount,
-		}
-	}
-
 	h.lastTimestamp = fileData.Timestamp
-	h.lastMetrics = metrics
-	return metrics
+	h.lastMetrics = fileData.GPUs
+	return fileData.GPUs
 }
 
 // GPUMetric holds per-device GPU telemetry. This struct is used by both
 // dcgm-init (for collection) and the agent (for TACS conversion).
 type GPUMetric struct {
-	GPUUUID            string
-	GPUUtilization     *float64
-	MemoryUtilization  *float64
-	MemoryTotal        *uint64
-	MemoryUsed         *uint64
-	PowerDraw          *float64
-	Temperature        *float64
-	RestartAppXidCount int64
+	GPUUUID            string   `json:"gpu_uuid"`
+	GPUUtilization     *float64 `json:"gpu_utilization_percent,omitempty"`
+	MemoryUtilization  *float64 `json:"memory_utilization_percent,omitempty"`
+	MemoryTotal        *uint64  `json:"memory_total_bytes,omitempty"`
+	MemoryUsed         *uint64  `json:"memory_used_bytes,omitempty"`
+	PowerDraw          *float64 `json:"power_draw_watts,omitempty"`
+	Temperature        *float64 `json:"temperature_celsius,omitempty"`
+	RestartAppXidCount int64    `json:"restart_app_xid_count"`
 }

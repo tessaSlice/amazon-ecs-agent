@@ -417,7 +417,7 @@ func TestGpuMetricsForContainer(t *testing.T) {
 	}
 }
 
-// TestExtractInstanceGPUPayloadValues verifies that extractInstanceGPUPayloadValues
+// TestExtractInstanceGPUPayloadValues verifies that ExtractInstanceGPUPayloadValues
 // correctly extracts InstanceGPULimit and InstanceGPUUsageTotal from payloads produced
 // by GPUMetricsToInstancePayload, and returns ok=false for invalid payloads.
 func TestExtractInstanceGPUPayloadValues(t *testing.T) {
@@ -518,7 +518,7 @@ func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 				payload = tc.rawPayload
 			}
 
-			limit, usage, ok := extractInstanceGPUPayloadValues(payload)
+			limit, usage, ok := ExtractInstanceGPUPayloadValues(payload)
 
 			if !tc.expectOK {
 				assert.False(t, ok, "Expected ok=false for invalid payload.")

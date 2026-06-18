@@ -22,7 +22,7 @@ func TestDCGMHandler_GetGPUMetrics_ValidFile(t *testing.T) {
 
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{
 				GPUUUID:            "GPU-abc-123",
 				GPUUtilization:     ptrFloat64(85.0),
@@ -59,7 +59,7 @@ func TestDCGMHandler_GetGPUMetrics_MultipleGPUs(t *testing.T) {
 
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-0", GPUUtilization: ptrFloat64(100.0), Temperature: ptrFloat64(55.0)},
 			{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(75.0), Temperature: ptrFloat64(50.0)},
 			{GPUUUID: "GPU-2", GPUUtilization: ptrFloat64(50.0), Temperature: ptrFloat64(45.0)},
@@ -103,7 +103,7 @@ func TestDCGMHandler_GetGPUMetrics_StaleData(t *testing.T) {
 	// Write data with a timestamp 5 minutes ago (exceeds 2min staleness threshold)
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-stale", GPUUtilization: ptrFloat64(50.0)},
 		},
 		Healthy: true,
@@ -123,7 +123,7 @@ func TestDCGMHandler_GetGPUMetrics_SameTimestampReturnsCached(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	data := GPUMetricsFileData{
 		Timestamp: ts,
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-cached", GPUUtilization: ptrFloat64(42.0)},
 		},
 		Healthy: true,
@@ -150,7 +150,7 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_NilPowerAndTemp(t *testing.T) {
 	// Fractional vGPUs (g6f instances) don't report power or temperature
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{
 				GPUUUID:            "GPU-fractional",
 				GPUUtilization:     ptrFloat64(0.0),
@@ -183,7 +183,7 @@ func TestDCGMHandler_GetGPUMetrics_InvalidTimestamp(t *testing.T) {
 
 	data := GPUMetricsFileData{
 		Timestamp: "not-a-timestamp",
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-bad-ts"},
 		},
 		Healthy: true,

@@ -24,7 +24,7 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 	// Simulate dcgm-init writing valid metrics
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{
 				GPUUUID:            "GPU-aaaa-1111",
 				GPUUtilization:     ptrFloat64(95.0),
@@ -143,7 +143,7 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 	// 4-GPU instance (like g4dn.12xlarge)
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-0", GPUUtilization: ptrFloat64(100.0), PowerDraw: ptrFloat64(70.0), Temperature: ptrFloat64(60.0)},
 			{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(80.0), PowerDraw: ptrFloat64(65.0), Temperature: ptrFloat64(55.0)},
 			{GPUUUID: "GPU-2", GPUUtilization: ptrFloat64(50.0), PowerDraw: ptrFloat64(50.0), Temperature: ptrFloat64(50.0)},
@@ -203,7 +203,7 @@ func TestGPUMetrics_StaleData_NotIncludedInPayload(t *testing.T) {
 	// Write data with old timestamp (simulates dcgm-init crashed 5 min ago)
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339),
-		GPUs: []GPUMetricJSON{
+		GPUs: []GPUMetric{
 			{GPUUUID: "GPU-stale", GPUUtilization: ptrFloat64(99.0)},
 		},
 		Healthy: true,
