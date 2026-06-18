@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -80,6 +81,14 @@ func main() {
 		logger.Info("received shutdown signal")
 		cancel()
 	}()
+
+	// Create the output directory with restrictive permissions (owner: root, mode: 0755).
+	// Only dcgm-init (running as root) can write; ecs-agent reads via read-only bind mount.
+	outputDir := filepath.Dir(*outputPath)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		logger.Error("failed to create output directory", zap.String("path", outputDir), zap.Error(err))
+		os.Exit(1)
+	}
 
 	if err := run(ctx, client, logger, *outputPath, *collectionFreq, *oneShot); err != nil {
 		logger.Error("dcgm-init failed", zap.Error(err))
