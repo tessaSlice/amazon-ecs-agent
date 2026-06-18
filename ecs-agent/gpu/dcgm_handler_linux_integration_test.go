@@ -174,14 +174,57 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 	containerAPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-0", "GPU-1"})
 	require.Len(t, containerAPayload, 2)
 
+	// Verify Container A's GPU-0 metrics are correct
+	aGPU0 := containerAPayload[0]
+	assert.Equal(t, "AcceleratedDevice", *aGPU0.Dimensions[0].Key)
+	assert.Equal(t, "GPU-0", *aGPU0.Dimensions[0].Value)
+	for _, gm := range aGPU0.GeneralMetrics {
+		switch *gm.MetricName {
+		case "GPUUtilization":
+			assert.Equal(t, 100.0, *gm.MetricValueDouble, "GPU-0 utilization should be 100%%")
+		case "GPUPowerDraw":
+			assert.Equal(t, 70.0, *gm.MetricValueDouble, "GPU-0 power should be 70W")
+		case "GPUTemperature":
+			assert.Equal(t, 60.0, *gm.MetricValueDouble, "GPU-0 temp should be 60C")
+		}
+	}
+
+	// Verify Container A's GPU-1 metrics are correct
+	aGPU1 := containerAPayload[1]
+	assert.Equal(t, "GPU-1", *aGPU1.Dimensions[0].Value)
+	for _, gm := range aGPU1.GeneralMetrics {
+		switch *gm.MetricName {
+		case "GPUUtilization":
+			assert.Equal(t, 80.0, *gm.MetricValueDouble, "GPU-1 utilization should be 80%%")
+		case "GPUPowerDraw":
+			assert.Equal(t, 65.0, *gm.MetricValueDouble, "GPU-1 power should be 65W")
+		case "GPUTemperature":
+			assert.Equal(t, 55.0, *gm.MetricValueDouble, "GPU-1 temp should be 55C")
+		}
+	}
+
 	// Container B has GPU 2
 	containerBPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-2"})
 	require.Len(t, containerBPayload, 1)
 	assert.Equal(t, "GPU-2", *containerBPayload[0].Dimensions[0].Value)
+	for _, gm := range containerBPayload[0].GeneralMetrics {
+		switch *gm.MetricName {
+		case "GPUUtilization":
+			assert.Equal(t, 50.0, *gm.MetricValueDouble, "GPU-2 utilization should be 50%%")
+		case "GPUPowerDraw":
+			assert.Equal(t, 50.0, *gm.MetricValueDouble, "GPU-2 power should be 50W")
+		case "GPUTemperature":
+			assert.Equal(t, 50.0, *gm.MetricValueDouble, "GPU-2 temp should be 50C")
+		}
+	}
 
 	// Container C has no GPUs (CPU-only task)
 	containerCPayload := GPUMetricsForContainer(gpuMetrics, nil)
 	assert.Nil(t, containerCPayload)
+
+	// Container D requests a GPU that doesn't exist on the instance
+	containerDPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-nonexistent"})
+	assert.Nil(t, containerDPayload, "Requesting a non-existent GPU should return nil")
 
 	// GPU-3 is unassigned — should not appear in any container payload
 	allAssigned := append(containerAPayload, containerBPayload...)
@@ -190,21 +233,53 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 			"Unassigned GPU-3 should not appear in any container's payload")
 	}
 
+	// Verify GPU-3 can be retrieved if explicitly requested
+	unassignedPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-3"})
+	require.Len(t, unassignedPayload, 1)
+	assert.Equal(t, "GPU-3", *unassignedPayload[0].Dimensions[0].Value)
+	for _, gm := range unassignedPayload[0].GeneralMetrics {
+		switch *gm.MetricName {
+		case "GPUUtilization":
+			assert.Equal(t, 0.0, *gm.MetricValueDouble, "GPU-3 should be idle")
+		case "GPUPowerDraw":
+			assert.Equal(t, 9.0, *gm.MetricValueDouble, "GPU-3 idle power should be 9W")
+		case "GPUTemperature":
+			assert.Equal(t, 35.0, *gm.MetricValueDouble, "GPU-3 idle temp should be 35C")
+		}
+	}
+
+	// Verify all 4 GPUs can be retrieved at once (full instance query)
+	allGPUsPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"})
+	require.Len(t, allGPUsPayload, 4, "Should return all 4 GPUs when all UUIDs requested")
+
 	// Instance-level should still report all 4 GPUs as the limit
 	instancePayload := GPUMetricsToInstancePayload(gpuMetrics, 3) // 3 GPUs assigned across containers
 	require.NotNil(t, instancePayload)
+	require.Len(t, instancePayload, 1)
+	require.Len(t, instancePayload[0].GeneralMetrics, 2)
 
 	var limit, usage int64
 	for _, gm := range instancePayload[0].GeneralMetrics {
 		switch *gm.MetricName {
 		case "InstanceGPULimit":
 			limit = *gm.MetricValueLong
+			assert.Equal(t, "Count", *gm.Unit)
 		case "InstanceGPUUsageTotal":
 			usage = *gm.MetricValueLong
+			assert.Equal(t, "Count", *gm.Unit)
 		}
 	}
 	assert.Equal(t, int64(4), limit, "All 4 GPUs on the instance")
 	assert.Equal(t, int64(3), usage, "3 GPUs assigned to task containers")
+
+	// Verify instance payload with 0 usage (no tasks running)
+	idleInstancePayload := GPUMetricsToInstancePayload(gpuMetrics, 0)
+	require.NotNil(t, idleInstancePayload)
+	for _, gm := range idleInstancePayload[0].GeneralMetrics {
+		if *gm.MetricName == "InstanceGPUUsageTotal" {
+			assert.Equal(t, int64(0), *gm.MetricValueLong, "No GPUs in use when no tasks running")
+		}
+	}
 }
 
 // TestGPUMetrics_StaleData_NotReEmitted verifies that when dcgm-init stops
