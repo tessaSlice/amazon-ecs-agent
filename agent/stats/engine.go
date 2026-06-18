@@ -38,6 +38,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
@@ -115,6 +116,11 @@ type DockerStatsEngine struct {
 
 	csiClient  csiclient.CSIClient
 	dataClient data.Client
+
+	// dcgmHandler reads GPU metrics from the shared file written by dcgm-init.
+	dcgmHandler *gpu.DCGMHandler
+	// gpuMetricsPublishCount tracks ticks to emit GPU metrics every 60s (3 ticks at 20s).
+	gpuMetricsPublishCount int
 }
 
 // ResolveTask resolves the api task object, given container id.
@@ -172,6 +178,7 @@ func NewDockerStatsEngine(cfg *config.Config, client dockerapi.DockerClient, con
 		metricsChannel:                      metricsChannel,
 		healthChannel:                       healthChannel,
 		dataClient:                          dataClient,
+		dcgmHandler:                         gpu.NewDCGMHandler(""),
 	}
 }
 
@@ -484,6 +491,23 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 			Metadata:    metricsMetadata,
 			TaskMetrics: taskMetrics,
 		}
+
+		// Emit GPU instance-level metrics every 3rd tick (60s at 20s publish interval).
+		engine.gpuMetricsPublishCount++
+		if engine.gpuMetricsPublishCount >= 3 {
+			engine.gpuMetricsPublishCount = 0
+			gpuMetrics := engine.dcgmHandler.GetGPUMetrics()
+			if len(gpuMetrics) > 0 {
+				usageTotal := engine.computeGPUUsageTotal()
+				instancePayload := gpu.GPUMetricsToInstancePayload(gpuMetrics, usageTotal)
+				if instancePayload != nil {
+					metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
+						GeneralMetricsPayload: instancePayload,
+					}
+				}
+			}
+		}
+
 		select {
 		case engine.metricsChannel <- metricsMessage:
 			seelog.Debugf("sent telemetry message")
@@ -939,9 +963,44 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 				}
 			}
 		}
+		// Add GPU metrics for containers with assigned GPUs.
+		if engine.gpuMetricsPublishCount == 0 {
+			if task, taskErr := engine.resolver.ResolveTask(dockerID); taskErr == nil {
+				if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
+					gpuIDs := dockerContainer.Container.GPUIDs
+					if len(gpuIDs) > 0 {
+						gpuMetrics := engine.dcgmHandler.GetGPUMetrics()
+						gpuPayload := gpu.GPUMetricsForContainer(gpuMetrics, gpuIDs)
+						if len(gpuPayload) > 0 {
+							containerMetric.GeneralMetricsPayload = gpuPayload
+						}
+						_ = task // suppress unused warning
+					}
+				}
+			}
+		}
+
 		containerMetrics = append(containerMetrics, containerMetric)
 	}
 	return containerMetrics, nil
+}
+
+// computeGPUUsageTotal counts the total number of unique GPU device IDs assigned
+// to running task containers on this instance.
+func (engine *DockerStatsEngine) computeGPUUsageTotal() int64 {
+	gpuSet := make(map[string]struct{})
+	for taskArn := range engine.tasksToContainers {
+		task, err := engine.resolver.ResolveTaskByARN(taskArn)
+		if err != nil {
+			continue
+		}
+		for _, container := range task.Containers {
+			for _, gpuID := range container.GPUIDs {
+				gpuSet[gpuID] = struct{}{}
+			}
+		}
+	}
+	return int64(len(gpuSet))
 }
 
 func (engine *DockerStatsEngine) doRemoveContainerUnsafe(container *StatsContainer, taskArn string) {
