@@ -61,7 +61,7 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 	wrapper := containerMetric.GeneralMetricsPayload[0]
 	assert.Equal(t, "AcceleratedDevice", *wrapper.Dimensions[0].Key)
 	assert.Equal(t, "GPU-aaaa-1111", *wrapper.Dimensions[0].Value)
-	assert.Len(t, wrapper.GeneralMetrics, 6)
+	assert.Len(t, wrapper.GeneralMetrics, 7)
 
 	// Build instance-level payload
 	instancePayload := GPUMetricsToInstancePayload(gpuMetrics, 1)
