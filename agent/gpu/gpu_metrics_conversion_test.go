@@ -139,7 +139,7 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := gpuMetricToGeneralMetricsWrapper(tc.metric)
+			result := GPUMetricToGeneralMetricsWrapper(tc.metric)
 
 			if tc.expectNil {
 				assert.Nil(t, result, "Expected nil wrapper when all fields are nil.")
@@ -256,7 +256,7 @@ func TestGpuMetricsToInstancePayload(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := gpuMetricsToInstancePayload(tc.metrics, tc.usageTotal)
+			result := GPUMetricsToInstancePayload(tc.metrics, tc.usageTotal)
 
 			if tc.expectNil {
 				assert.Nil(t, result, "Expected nil payload for empty input.")
@@ -394,7 +394,7 @@ func TestGpuMetricsForContainer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := gpuMetricsForContainer(tc.metrics, tc.deviceIDs)
+			result := GPUMetricsForContainer(tc.metrics, tc.deviceIDs)
 
 			if tc.expectNil {
 				assert.Nil(t, result, "Expected nil result.")
@@ -428,7 +428,7 @@ func ptrInt64(v int64) *int64 {
 
 // TestExtractInstanceGPUPayloadValues verifies that extractInstanceGPUPayloadValues
 // correctly extracts InstanceGPULimit and InstanceGPUUsageTotal from payloads produced
-// by gpuMetricsToInstancePayload, and returns ok=false for invalid payloads.
+// by GPUMetricsToInstancePayload, and returns ok=false for invalid payloads.
 func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 	t.Parallel()
 
@@ -521,7 +521,7 @@ func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 
 			var payload []*ecstcs.GeneralMetricsWrapper
 			if tc.buildPayload {
-				payload = gpuMetricsToInstancePayload(tc.metrics, tc.usageTotal)
+				payload = GPUMetricsToInstancePayload(tc.metrics, tc.usageTotal)
 				require.NotNil(t, payload)
 			} else {
 				payload = tc.rawPayload

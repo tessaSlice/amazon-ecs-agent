@@ -33,7 +33,7 @@ const gpuDeviceDimensionKey = "AcceleratedDevice"
 
 // gpuMetricToGeneralMetricsWrapper converts a single GPUMetric to a GeneralMetricsWrapper.
 // Only non-nil metric fields are included. Returns nil if all metric fields are nil.
-func gpuMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper {
+func GPUMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper {
 	var generalMetrics []*ecstcs.GeneralMetric
 
 	if m.GPUUtilization != nil {
@@ -107,7 +107,7 @@ func gpuMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper
 // GeneralMetricsWrapper entries containing InstanceGPULimit and InstanceGPUUsageTotal.
 // The usageTotal parameter is the pre-computed count of unique GPU device IDs assigned
 // to running task containers. Returns nil if the input slice is empty.
-func gpuMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
+func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 {
 		return nil
 	}
@@ -164,7 +164,7 @@ func extractInstanceGPUPayloadValues(payload []*ecstcs.GeneralMetricsWrapper) (l
 // gpuMetricsForContainer returns the GeneralMetricsWrapper entries for a specific
 // container based on its assigned GPU device IDs. It matches GPUMetric GPUUUID
 // against the provided device ID list.
-func gpuMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstcs.GeneralMetricsWrapper {
+func GPUMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 || len(gpuDeviceIDs) == 0 {
 		return nil
 	}
@@ -180,7 +180,7 @@ func gpuMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstc
 		if _, ok := deviceIDSet[m.GPUUUID]; !ok {
 			continue
 		}
-		wrapper := gpuMetricToGeneralMetricsWrapper(m)
+		wrapper := GPUMetricToGeneralMetricsWrapper(m)
 		if wrapper != nil {
 			result = append(result, wrapper)
 		}
@@ -189,17 +189,4 @@ func gpuMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstc
 	return result
 }
 
-// Exported wrappers for use by stats engine.
-
-func GPUMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper {
-	return gpuMetricToGeneralMetricsWrapper(m)
-}
-
-func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
-	return gpuMetricsToInstancePayload(metrics, usageTotal)
-}
-
-func GPUMetricsForContainer(metrics []GPUMetric, gpuDeviceIDs []string) []*ecstcs.GeneralMetricsWrapper {
-	return gpuMetricsForContainer(metrics, gpuDeviceIDs)
-}
 
