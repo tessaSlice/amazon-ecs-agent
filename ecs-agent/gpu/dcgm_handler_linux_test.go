@@ -22,12 +22,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func ptrFloat64(v float64) *float64 { return &v }
-func ptrUint64(v uint64) *uint64    { return &v }
 
 func TestDCGMHandler_GetGPUMetrics_ValidFile(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -38,12 +36,12 @@ func TestDCGMHandler_GetGPUMetrics_ValidFile(t *testing.T) {
 		GPUs: []GPUMetric{
 			{
 				GPUUUID:            "GPU-abc-123",
-				GPUUtilization:     ptrFloat64(85.0),
-				MemoryUtilization:  ptrFloat64(50.0),
-				MemoryTotal:        ptrUint64(16106127360),
-				MemoryUsed:         ptrUint64(8053063680),
-				PowerDraw:          ptrFloat64(250.5),
-				Temperature:        ptrFloat64(72.0),
+				GPUUtilization:     aws.Float64(85.0),
+				MemoryUtilization:  aws.Float64(50.0),
+				MemoryTotal:        aws.Uint64(16106127360),
+				MemoryUsed:         aws.Uint64(8053063680),
+				PowerDraw:          aws.Float64(250.5),
+				Temperature:        aws.Float64(72.0),
 				RestartAppXidCount: 0,
 			},
 		},
@@ -73,10 +71,10 @@ func TestDCGMHandler_GetGPUMetrics_MultipleGPUs(t *testing.T) {
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-0", GPUUtilization: ptrFloat64(100.0), Temperature: ptrFloat64(55.0)},
-			{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(75.0), Temperature: ptrFloat64(50.0)},
-			{GPUUUID: "GPU-2", GPUUtilization: ptrFloat64(50.0), Temperature: ptrFloat64(45.0)},
-			{GPUUUID: "GPU-3", GPUUtilization: ptrFloat64(25.0), Temperature: ptrFloat64(40.0)},
+			{GPUUUID: "GPU-0", GPUUtilization: aws.Float64(100.0), Temperature: aws.Float64(55.0)},
+			{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(75.0), Temperature: aws.Float64(50.0)},
+			{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(50.0), Temperature: aws.Float64(45.0)},
+			{GPUUUID: "GPU-3", GPUUtilization: aws.Float64(25.0), Temperature: aws.Float64(40.0)},
 		},
 		Healthy: true,
 	}
@@ -130,7 +128,7 @@ func TestDCGMHandler_GetGPUMetrics_StaleData_SameTimestamp(t *testing.T) {
 	data := GPUMetricsFileData{
 		Timestamp: "2026-01-01T00:00:00Z",
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-stale", GPUUtilization: ptrFloat64(50.0)},
+			{GPUUUID: "GPU-stale", GPUUtilization: aws.Float64(50.0)},
 		},
 		Healthy: true,
 	}
@@ -159,7 +157,7 @@ func TestDCGMHandler_GetGPUMetrics_SameTimestampReturnsCached(t *testing.T) {
 	data := GPUMetricsFileData{
 		Timestamp: ts,
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-cached", GPUUtilization: ptrFloat64(42.0)},
+			{GPUUUID: "GPU-cached", GPUUtilization: aws.Float64(42.0)},
 		},
 		Healthy: true,
 	}
@@ -188,10 +186,10 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_NilPowerAndTemp(t *testing.T) {
 		GPUs: []GPUMetric{
 			{
 				GPUUUID:            "GPU-fractional",
-				GPUUtilization:     ptrFloat64(0.0),
-				MemoryUtilization:  ptrFloat64(7.5),
-				MemoryTotal:        ptrUint64(6442450944),
-				MemoryUsed:         ptrUint64(0),
+				GPUUtilization:     aws.Float64(0.0),
+				MemoryUtilization:  aws.Float64(7.5),
+				MemoryTotal:        aws.Uint64(6442450944),
+				MemoryUsed:         aws.Uint64(0),
 				PowerDraw:          nil,
 				Temperature:        nil,
 				RestartAppXidCount: 0,

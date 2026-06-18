@@ -40,12 +40,12 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 		GPUs: []GPUMetric{
 			{
 				GPUUUID:            "GPU-aaaa-1111",
-				GPUUtilization:     ptrFloat64(95.0),
-				MemoryUtilization:  ptrFloat64(60.0),
-				MemoryTotal:        ptrUint64(16106127360),
-				MemoryUsed:         ptrUint64(9663676416),
-				PowerDraw:          ptrFloat64(280.0),
-				Temperature:        ptrFloat64(78.0),
+				GPUUtilization:     aws.Float64(95.0),
+				MemoryUtilization:  aws.Float64(60.0),
+				MemoryTotal:        aws.Uint64(16106127360),
+				MemoryUsed:         aws.Uint64(9663676416),
+				PowerDraw:          aws.Float64(280.0),
+				Temperature:        aws.Float64(78.0),
 				RestartAppXidCount: 1,
 			},
 		},
@@ -157,10 +157,10 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-0", GPUUtilization: ptrFloat64(100.0), PowerDraw: ptrFloat64(70.0), Temperature: ptrFloat64(60.0)},
-			{GPUUUID: "GPU-1", GPUUtilization: ptrFloat64(80.0), PowerDraw: ptrFloat64(65.0), Temperature: ptrFloat64(55.0)},
-			{GPUUUID: "GPU-2", GPUUtilization: ptrFloat64(50.0), PowerDraw: ptrFloat64(50.0), Temperature: ptrFloat64(50.0)},
-			{GPUUUID: "GPU-3", GPUUtilization: ptrFloat64(0.0), PowerDraw: ptrFloat64(9.0), Temperature: ptrFloat64(35.0)},
+			{GPUUUID: "GPU-0", GPUUtilization: aws.Float64(100.0), PowerDraw: aws.Float64(70.0), Temperature: aws.Float64(60.0)},
+			{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(80.0), PowerDraw: aws.Float64(65.0), Temperature: aws.Float64(55.0)},
+			{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(50.0), PowerDraw: aws.Float64(50.0), Temperature: aws.Float64(50.0)},
+			{GPUUUID: "GPU-3", GPUUtilization: aws.Float64(0.0), PowerDraw: aws.Float64(9.0), Temperature: aws.Float64(35.0)},
 		},
 		Healthy: true,
 	}
@@ -294,7 +294,7 @@ func TestGPUMetrics_StaleData_NotReEmitted(t *testing.T) {
 	data := GPUMetricsFileData{
 		Timestamp: "2026-01-01T00:00:00Z",
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-stale", GPUUtilization: ptrFloat64(99.0)},
+			{GPUUUID: "GPU-stale", GPUUtilization: aws.Float64(99.0)},
 		},
 		Healthy: true,
 	}

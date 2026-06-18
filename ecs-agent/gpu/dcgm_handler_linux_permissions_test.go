@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,7 +119,7 @@ func TestGPUMetricsFile_ReadableByAgent(t *testing.T) {
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-read-test", GPUUtilization: ptrFloat64(50.0)},
+			{GPUUUID: "GPU-read-test", GPUUtilization: aws.Float64(50.0)},
 		},
 		Healthy: true,
 	}
@@ -155,4 +156,57 @@ func TestGPUMetricsDir_NonOwnerCannotCreateFiles(t *testing.T) {
 	newFilePath := filepath.Join(restrictedDir, "should-fail.json")
 	writeErr := os.WriteFile(newFilePath, []byte("test"), 0644)
 	assert.Error(t, writeErr, "Non-owner should not be able to create files in restricted directory")
+}
+
+// TestGPUMetricsDir_MkdirAllIdempotent verifies that dcgm-init does not fail
+// if the output directory already exists (race condition where ecs-init creates
+// the directory before dcgm-init starts).
+func TestGPUMetricsDir_MkdirAllIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	metricsDir := filepath.Join(tmpDir, "ecs")
+
+	// Simulate ecs-init creating the directory first
+	err := os.MkdirAll(metricsDir, 0755)
+	require.NoError(t, err)
+
+	info, err := os.Stat(metricsDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+
+	// Simulate dcgm-init calling MkdirAll on the same path (should not fail)
+	err = os.MkdirAll(metricsDir, 0755)
+	assert.NoError(t, err, "MkdirAll should not fail when directory already exists")
+
+	// Verify directory still exists with correct permissions
+	info, err = os.Stat(metricsDir)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+	assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
+}
+
+// TestGPUMetricsDir_ConcurrentCreation simulates a race condition where both
+// ecs-init and dcgm-init attempt to create the directory concurrently.
+func TestGPUMetricsDir_ConcurrentCreation(t *testing.T) {
+	tmpDir := t.TempDir()
+	metricsDir := filepath.Join(tmpDir, "ecs")
+
+	const goroutines = 10
+	errs := make(chan error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			errs <- os.MkdirAll(metricsDir, 0755)
+		}()
+	}
+
+	for i := 0; i < goroutines; i++ {
+		err := <-errs
+		assert.NoError(t, err, "Concurrent MkdirAll should never fail")
+	}
+
+	// Directory should exist with correct permissions
+	info, err := os.Stat(metricsDir)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+	assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
 }
