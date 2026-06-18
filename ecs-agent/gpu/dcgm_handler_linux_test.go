@@ -109,6 +109,16 @@ func TestDCGMHandler_GetGPUMetrics_InvalidJSON(t *testing.T) {
 	assert.Nil(t, metrics)
 }
 
+func TestDCGMHandler_GetGPUMetrics_EmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+	os.WriteFile(filePath, []byte(""), 0644)
+
+	handler := NewDCGMHandler(filePath)
+	metrics := handler.GetGPUMetrics()
+	assert.Nil(t, metrics, "Empty file should return nil (JSON parsing fails gracefully)")
+}
+
 // TestDCGMHandler_GetGPUMetrics_StaleData_SameTimestamp verifies that when dcgm-init
 // stops updating (crash/hang), the agent returns the cached metrics rather than
 // re-emitting duplicates. The "stale" condition is detected by the timestamp not changing.
