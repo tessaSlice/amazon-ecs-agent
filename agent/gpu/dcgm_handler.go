@@ -27,7 +27,6 @@ type GPUMetricsFileData struct {
 	UnhealthyReason string      `json:"unhealthy_reason,omitempty"`
 }
 
-
 // DCGMHandler reads GPU metrics from the shared file written by dcgm-init
 // and provides them to the stats engine for TACS reporting.
 type DCGMHandler struct {
