@@ -30,6 +30,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// Supported commands
+const (
+	START = "start"
+	STOP  = "stop"
+)
+
 const (
 	defaultOutputPath     = "/var/run/ecs/gpu-metrics.json"
 	defaultCollectionFreq = 60 * time.Second
@@ -45,13 +51,13 @@ func main() {
 	args := flag.Args()
 	if len(args) > 0 {
 		switch args[0] {
-		case "start":
+		case START:
 			// Continue to normal daemon operation below.
-		case "stop":
+		case STOP:
 			// Stop is handled by systemd sending SIGTERM; nothing to do here.
 			os.Exit(0)
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s (use 'start' or 'stop')\n", args[0])
+			fmt.Fprintf(os.Stderr, "unknown command: %s (use '%s' or '%s')\n", args[0], START, STOP)
 			os.Exit(1)
 		}
 	}
