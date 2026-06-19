@@ -58,6 +58,9 @@ func NewDCGMHandler(filePath string) *DCGMHandler {
 // GetGPUMetrics returns the latest GPU metrics read from the shared file.
 // Returns nil if the file is missing, stale, or unparseable.
 func (h *DCGMHandler) GetGPUMetrics() []GPUMetric {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	data, err := os.ReadFile(h.filePath)
 	if err != nil {
 		seelog.Debugf("GPU metrics file not available: %v", err)
@@ -76,12 +79,9 @@ func (h *DCGMHandler) GetGPUMetrics() []GPUMetric {
 		return nil
 	}
 
-	// If the timestamp hasn't changed since our last read, return nil to signal
-	// "no new data" — the stats engine should not re-emit stale metrics to TACS.
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if fileData.Timestamp == h.lastTimestamp {
+	// Only emit metrics if the timestamp is strictly newer than the last read.
+	// This prevents re-emitting stale data and guards against out-of-order reads.
+	if fileData.Timestamp <= h.lastTimestamp {
 		return nil
 	}
 
