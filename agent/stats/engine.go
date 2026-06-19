@@ -121,7 +121,7 @@ type DockerStatsEngine struct {
 	dcgmHandler *gpu.DCGMHandler
 	// gpuMetricsPublishCount tracks ticks to emit GPU metrics every 60s (3 ticks at 20s).
 	gpuMetricsPublishCount int
-	// lastGPUTimestamp tracks the last timestamp emitted to TACS to prevent duplicate emissions.
+	// lastGPUTimestamp tracks the last timestamp emitted to TACS to prevent emitting stale data.
 	lastGPUTimestamp string
 	// currentGPUMetrics holds the GPU metrics for the current publish tick,
 	// read once and shared between instance-level and container-level emission.
