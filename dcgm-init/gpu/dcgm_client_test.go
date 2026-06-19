@@ -83,7 +83,7 @@ func TestNewClient(t *testing.T) {
 }
 
 // TestClient_IsHealthy_NotInitialized tests that IsHealthy returns true during grace period when not connected.
-func TestClient_IsHealthy_NotInitialized(t *testing.T) {
+func TestClientIsHealthyNotInitialized(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -95,7 +95,7 @@ func TestClient_IsHealthy_NotInitialized(t *testing.T) {
 }
 
 // TestClient_Shutdown_NotInitialized tests that Shutdown handles not connected state gracefully.
-func TestClient_Shutdown_NotInitialized(t *testing.T) {
+func TestClientShutdownNotInitialized(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -107,7 +107,7 @@ func TestClient_Shutdown_NotInitialized(t *testing.T) {
 }
 
 // TestClient_Reconcile_NotInitialized tests that Reconcile initializes when not yet connected.
-func TestClient_Reconcile_NotInitialized(t *testing.T) {
+func TestClientReconcileNotInitialized(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -133,7 +133,7 @@ func TestClient_Reconcile_NotInitialized(t *testing.T) {
 }
 
 // TestClient_Reconcile_GracePeriod tests that errors are suppressed during grace period.
-func TestClient_Reconcile_GracePeriod(t *testing.T) {
+func TestClientReconcileGracePeriod(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -154,7 +154,7 @@ func TestClient_Reconcile_GracePeriod(t *testing.T) {
 }
 
 // TestClient_Reconcile_AfterGracePeriod tests that errors are reported after grace period.
-func TestClient_Reconcile_AfterGracePeriod(t *testing.T) {
+func TestClientReconcileAfterGracePeriod(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -175,7 +175,7 @@ func TestClient_Reconcile_AfterGracePeriod(t *testing.T) {
 }
 
 // TestClient_MultipleShutdownCalls tests that multiple Shutdown calls are safe.
-func TestClient_MultipleShutdownCalls(t *testing.T) {
+func TestClientMultipleShutdownCalls(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -192,7 +192,7 @@ func TestClient_MultipleShutdownCalls(t *testing.T) {
 }
 
 // TestClient_Shutdown_Initialized tests that Shutdown properly cleans up when client is connected.
-func TestClient_Shutdown_Initialized(t *testing.T) {
+func TestClientShutdownInitialized(t *testing.T) {
 	testCases := []struct {
 		name        string
 		description string
@@ -249,7 +249,7 @@ func TestClient_Shutdown_Initialized(t *testing.T) {
 }
 
 // TestClient_ThreadSafety tests that concurrent access to IsHealthy is thread-safe.
-func TestClient_ThreadSafety(t *testing.T) {
+func TestClientThreadSafety(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -277,7 +277,7 @@ func TestClient_ThreadSafety(t *testing.T) {
 }
 
 // TestClient_ContextCancellation tests that context cancellation stops policy listener.
-func TestClient_ContextCancellation(t *testing.T) {
+func TestClientContextCancellation(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -300,7 +300,7 @@ func TestClient_ContextCancellation(t *testing.T) {
 }
 
 // TestClient_LoggerUsage tests that logger is properly used.
-func TestClient_LoggerUsage(t *testing.T) {
+func TestClientLoggerUsage(t *testing.T) {
 	t.Parallel()
 
 	// Create a logger that captures logs.
@@ -318,7 +318,7 @@ func TestClient_LoggerUsage(t *testing.T) {
 }
 
 // TestClient_DefaultLogger tests client creation with default logger.
-func TestClient_DefaultLogger(t *testing.T) {
+func TestClientDefaultLogger(t *testing.T) {
 	t.Parallel()
 
 	// Use default logger.
@@ -335,7 +335,7 @@ func TestClient_DefaultLogger(t *testing.T) {
 }
 
 // TestClient_HealthyStateProducesCorrectStatus tests that healthy client state produces OK status.
-func TestClient_HealthyStateProducesCorrectStatus(t *testing.T) {
+func TestClientHealthyStateProducesCorrectStatus(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -362,7 +362,7 @@ func TestClient_HealthyStateProducesCorrectStatus(t *testing.T) {
 }
 
 // TestClient_UnhealthyStateProducesCorrectStatus tests that unhealthy client state produces IMPAIRED status.
-func TestClient_UnhealthyStateProducesCorrectStatus(t *testing.T) {
+func TestClientUnhealthyStateProducesCorrectStatus(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -550,7 +550,7 @@ func TestExtractXIDCode(t *testing.T) {
 }
 
 // TestIsCriticalViolation_NonXIDPolicies tests that all non-XID policy types are marked as critical.
-func TestIsCriticalViolation_NonXIDPolicies(t *testing.T) {
+func TestIsCriticalViolationNonXIDPolicies(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -748,7 +748,7 @@ func (m mockPolicyViolation) toPolicyViolation() dcgm.PolicyViolation {
 }
 
 // TestClient_IsConnectionLost_WithinGracePeriod tests that IsConnectionLost returns false within grace period.
-func TestClient_IsConnectionLost_WithinGracePeriod(t *testing.T) {
+func TestClientIsConnectionLostWithinGracePeriod(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -800,7 +800,7 @@ func TestClient_IsConnectionLost_WithinGracePeriod(t *testing.T) {
 }
 
 // TestClient_IsConnectionLost_OutsideGracePeriod tests that IsConnectionLost returns true outside grace period.
-func TestClient_IsConnectionLost_OutsideGracePeriod(t *testing.T) {
+func TestClientIsConnectionLostOutsideGracePeriod(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -855,7 +855,7 @@ func TestClient_IsConnectionLost_OutsideGracePeriod(t *testing.T) {
 }
 
 // TestClient_IsConnectionLost_ThreadSafety tests that concurrent access to IsConnectionLost is thread-safe.
-func TestClient_IsConnectionLost_ThreadSafety(t *testing.T) {
+func TestClientIsConnectionLostThreadSafety(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -883,7 +883,7 @@ func TestClient_IsConnectionLost_ThreadSafety(t *testing.T) {
 }
 
 // TestClient_IsConnectionLost_InitialState tests IsConnectionLost behavior on newly created client.
-func TestClient_IsConnectionLost_InitialState(t *testing.T) {
+func TestClientIsConnectionLostInitialState(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -897,7 +897,7 @@ func TestClient_IsConnectionLost_InitialState(t *testing.T) {
 }
 
 // TestClient_IsConnectionLost_AfterReconcile tests IsConnectionLost behavior after Reconcile attempts.
-func TestClient_IsConnectionLost_AfterReconcile(t *testing.T) {
+func TestClientIsConnectionLostAfterReconcile(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -925,7 +925,7 @@ func TestClient_IsConnectionLost_AfterReconcile(t *testing.T) {
 }
 
 // TestClient_IsConnectionLost_DistinguishesFromIsHealthy tests that IsConnectionLost and IsHealthy work together.
-func TestClient_IsConnectionLost_DistinguishesFromIsHealthy(t *testing.T) {
+func TestClientIsConnectionLostDistinguishesFromIsHealthy(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -1016,7 +1016,7 @@ func TestClient_IsConnectionLost_DistinguishesFromIsHealthy(t *testing.T) {
 }
 
 // TestClient_PolicyViolationIntegration tests the complete flow from policy violation to health status.
-func TestClient_PolicyViolationIntegration(t *testing.T) {
+func TestClientPolicyViolationIntegration(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -1125,7 +1125,7 @@ func TestClient_PolicyViolationIntegration(t *testing.T) {
 // Note: This test documents the expected behavior when DCGM health checks return different result codes.
 // In the actual implementation, IsHealthy() calls dcgm.HealthCheck() which is not available in tests,
 // so we test the filtering logic conceptually.
-func TestClient_HealthCheckResultFiltering(t *testing.T) {
+func TestClientHealthCheckResultFiltering(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -1202,7 +1202,7 @@ func TestClient_HealthCheckResultFiltering(t *testing.T) {
 }
 
 // TestClient_ConnectionLossDetection tests connection loss detection scenarios.
-func TestClient_ConnectionLossDetection(t *testing.T) {
+func TestClientConnectionLossDetection(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -1271,7 +1271,7 @@ func TestClient_ConnectionLossDetection(t *testing.T) {
 	}
 }
 
-func TestClient_IsHealthy(t *testing.T) {
+func TestClientIsHealthy(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -1330,7 +1330,7 @@ func TestClient_IsHealthy(t *testing.T) {
 }
 
 // TestClient_PolicyViolationLoggingFields tests that all required fields are logged for policy violations.
-func TestClient_PolicyViolationLoggingFields(t *testing.T) {
+func TestClientPolicyViolationLoggingFields(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -1434,7 +1434,7 @@ func TestClient_PolicyViolationLoggingFields(t *testing.T) {
 }
 
 // TestClient_GetMetrics_NotConnected tests that GetMetrics returns an error when client is not connected.
-func TestClient_GetMetrics_NotConnected(t *testing.T) {
+func TestClientGetMetricsNotConnected(t *testing.T) {
 	t.Parallel()
 
 	logger := zaptest.NewLogger(t)
@@ -2006,4 +2006,3 @@ func makeStringFieldValue(status int, val string) dcgm.FieldValue_v1 {
 
 func ptrFloat64(v float64) *float64 { return &v }
 func ptrUint64(v uint64) *uint64    { return &v }
-
