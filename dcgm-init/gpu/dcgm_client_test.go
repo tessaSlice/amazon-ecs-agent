@@ -25,8 +25,6 @@ import (
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 // TestNewClient tests the NewClient constructor with various configurations.
@@ -65,8 +63,7 @@ func TestNewClient(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(tc.config, logger)
+			client := NewClient(tc.config)
 
 			require.NotNil(t, client, "NewClient should return a non-nil client")
 
@@ -75,7 +72,6 @@ func TestNewClient(t *testing.T) {
 			require.True(t, ok, "Client should be of type *dcgmClient")
 
 			assert.Equal(t, tc.expectedSocketPath, dcgmClient.socketPath, tc.description)
-			assert.NotNil(t, dcgmClient.logger, "Logger should be set")
 			assert.False(t, dcgmClient.connected, "Client should not be connected on creation")
 			assert.False(t, dcgmClient.hasViolation, "Client should not have violations on creation")
 		})
@@ -86,8 +82,7 @@ func TestNewClient(t *testing.T) {
 func TestClientIsHealthyNotInitialized(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{})
 
 	healthy := client.IsHealthy()
 
@@ -98,8 +93,7 @@ func TestClientIsHealthyNotInitialized(t *testing.T) {
 func TestClientShutdownNotInitialized(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{})
 
 	err := client.Shutdown()
 
@@ -110,8 +104,7 @@ func TestClientShutdownNotInitialized(t *testing.T) {
 func TestClientReconcileNotInitialized(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute}, logger)
+	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -136,8 +129,7 @@ func TestClientReconcileNotInitialized(t *testing.T) {
 func TestClientReconcileGracePeriod(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{InitializationGracePeriod: 5 * time.Second}, logger)
+	client := NewClient(Config{InitializationGracePeriod: 5 * time.Second})
 
 	// Set lastShutdown to now to trigger grace period.
 	dcgmClient, ok := client.(*dcgmClient)
@@ -157,8 +149,7 @@ func TestClientReconcileGracePeriod(t *testing.T) {
 func TestClientReconcileAfterGracePeriod(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{InitializationGracePeriod: 100 * time.Millisecond}, logger)
+	client := NewClient(Config{InitializationGracePeriod: 100 * time.Millisecond})
 
 	// Set lastShutdown to past to be outside grace period.
 	dcgmClient, ok := client.(*dcgmClient)
@@ -178,8 +169,7 @@ func TestClientReconcileAfterGracePeriod(t *testing.T) {
 func TestClientMultipleShutdownCalls(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{})
 
 	// Call Shutdown multiple times.
 	err1 := client.Shutdown()
@@ -207,8 +197,7 @@ func TestClientShutdownInitialized(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(Config{}, logger)
+			client := NewClient(Config{})
 
 			// Type assert to access internal fields.
 			dcgmClient, ok := client.(*dcgmClient)
@@ -252,8 +241,7 @@ func TestClientShutdownInitialized(t *testing.T) {
 func TestClientThreadSafety(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{})
 
 	// Launch multiple goroutines calling IsHealthy concurrently.
 	const goroutines = 10
@@ -280,8 +268,7 @@ func TestClientThreadSafety(t *testing.T) {
 func TestClientContextCancellation(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute}, logger)
+	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -304,8 +291,7 @@ func TestClientLoggerUsage(t *testing.T) {
 	t.Parallel()
 
 	// Create a logger that captures logs.
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute}, logger)
+	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -321,10 +307,9 @@ func TestClientLoggerUsage(t *testing.T) {
 func TestClientDefaultLogger(t *testing.T) {
 	t.Parallel()
 
-	// Use default logger.
-	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute}, zap.L())
+	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute})
 
-	require.NotNil(t, client, "Client should work with zap.L() default logger")
+	require.NotNil(t, client, "Client should work with default logger")
 
 	// Verify basic operations work.
 	healthy := client.IsHealthy()
@@ -338,8 +323,7 @@ func TestClientDefaultLogger(t *testing.T) {
 func TestClientHealthyStateProducesCorrectStatus(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{SocketPath: "/run/nvidia-dcgm/nv-hostengine"}, logger)
+	client := NewClient(Config{SocketPath: "/run/nvidia-dcgm/nv-hostengine"})
 
 	// Type assert to access internal fields.
 	dcgmClient, ok := client.(*dcgmClient)
@@ -365,8 +349,7 @@ func TestClientHealthyStateProducesCorrectStatus(t *testing.T) {
 func TestClientUnhealthyStateProducesCorrectStatus(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{SocketPath: "/run/nvidia-dcgm/nv-hostengine"}, logger)
+	client := NewClient(Config{SocketPath: "/run/nvidia-dcgm/nv-hostengine"})
 
 	// Type assert to access internal fields.
 	dcgmClient, ok := client.(*dcgmClient)
@@ -439,12 +422,11 @@ func TestSocketPathConfigurationAcceptance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
 			config := Config{
 				SocketPath: tc.socketPath,
 			}
 
-			client := NewClient(config, logger)
+			client := NewClient(config)
 
 			require.NotNil(t, client, "NewClient should return a non-nil client")
 
@@ -594,8 +576,7 @@ func TestIsCriticalViolationNonXIDPolicies(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(Config{}, logger)
+			client := NewClient(Config{})
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok)
 
@@ -682,8 +663,7 @@ func TestXIDFilteringIntegration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(Config{}, logger)
+			client := NewClient(Config{})
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok)
 
@@ -775,11 +755,10 @@ func TestClientIsConnectionLostWithinGracePeriod(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
 			config := Config{
 				InitializationGracePeriod: tc.gracePeriod,
 			}
-			client := NewClient(config, logger)
+			client := NewClient(config)
 
 			// Type assert to access internal fields.
 			dcgmClient, ok := client.(*dcgmClient)
@@ -830,11 +809,10 @@ func TestClientIsConnectionLostOutsideGracePeriod(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
 			config := Config{
 				InitializationGracePeriod: tc.gracePeriod,
 			}
-			client := NewClient(config, logger)
+			client := NewClient(config)
 
 			// Type assert to access internal fields.
 			dcgmClient, ok := client.(*dcgmClient)
@@ -858,8 +836,7 @@ func TestClientIsConnectionLostOutsideGracePeriod(t *testing.T) {
 func TestClientIsConnectionLostThreadSafety(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{})
 
 	// Launch multiple goroutines calling IsConnectionLost concurrently.
 	const goroutines = 10
@@ -886,8 +863,7 @@ func TestClientIsConnectionLostThreadSafety(t *testing.T) {
 func TestClientIsConnectionLostInitialState(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{InitializationGracePeriod: 5 * time.Second}, logger)
+	client := NewClient(Config{InitializationGracePeriod: 5 * time.Second})
 
 	// Check IsConnectionLost immediately after creation.
 	connectionLost := client.IsConnectionLost()
@@ -900,8 +876,7 @@ func TestClientIsConnectionLostInitialState(t *testing.T) {
 func TestClientIsConnectionLostAfterReconcile(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{InitializationGracePeriod: 100 * time.Millisecond}, logger)
+	client := NewClient(Config{InitializationGracePeriod: 100 * time.Millisecond})
 
 	// Type assert to access internal fields.
 	dcgmClient, ok := client.(*dcgmClient)
@@ -984,11 +959,10 @@ func TestClientIsConnectionLostDistinguishesFromIsHealthy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
 			config := Config{
 				InitializationGracePeriod: tc.gracePeriod,
 			}
-			client := NewClient(config, logger)
+			client := NewClient(config)
 
 			// Type assert to access internal fields.
 			dcgmClient, ok := client.(*dcgmClient)
@@ -1089,8 +1063,7 @@ func TestClientPolicyViolationIntegration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(Config{}, logger)
+			client := NewClient(Config{})
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok)
 
@@ -1167,8 +1140,7 @@ func TestClientHealthCheckResultFiltering(t *testing.T) {
 			// Since we cannot mock dcgm.HealthCheck() in unit tests (it requires actual DCGM),
 			// we verify the logic is correctly implemented by checking the code behavior.
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(Config{}, logger)
+			client := NewClient(Config{})
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok)
 
@@ -1243,11 +1215,10 @@ func TestClientConnectionLossDetection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
 			config := Config{
 				InitializationGracePeriod: tc.gracePeriod,
 			}
-			client := NewClient(config, logger)
+			client := NewClient(config)
 
 			// Type assert to access internal fields.
 			dcgmClient, ok := client.(*dcgmClient)
@@ -1308,8 +1279,7 @@ func TestClientIsHealthy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(Config{}, logger)
+			client := NewClient(Config{})
 
 			// Type assert to access internal fields.
 			dcgmClient, ok := client.(*dcgmClient)
@@ -1416,8 +1386,7 @@ func TestClientPolicyViolationLoggingFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := zaptest.NewLogger(t)
-			client := NewClient(Config{}, logger)
+			client := NewClient(Config{})
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok)
 
@@ -1437,8 +1406,7 @@ func TestClientPolicyViolationLoggingFields(t *testing.T) {
 func TestClientGetMetricsNotConnected(t *testing.T) {
 	t.Parallel()
 
-	logger := zaptest.NewLogger(t)
-	client := NewClient(Config{}, logger)
+	client := NewClient(Config{})
 
 	ctx := context.Background()
 	metrics, err := client.GetMetrics(ctx)

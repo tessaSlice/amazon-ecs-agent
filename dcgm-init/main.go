@@ -27,7 +27,8 @@ import (
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/gpu"
-	"go.uber.org/zap"
+	"github.com/aws/amazon-ecs-agent/dcgm-init/logger"
+	log "github.com/cihub/seelog"
 )
 
 // Supported commands
@@ -64,18 +65,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	logger, err := zap.NewProduction()
-	if err != nil {
-		die(fmt.Sprintf("failed to create logger: %v", err))
-	}
-	defer logger.Sync()
+	logger.Setup()
+	defer log.Flush()
 
 	config := gpu.Config{
 		SocketPath:                *socketPath,
 		InitializationGracePeriod: gpu.DefaultInitializationGracePeriod,
 	}
 
-	client := gpu.NewClient(config, logger)
+	client := gpu.NewClient(config)
 	defer client.Shutdown()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,7 +83,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		logger.Info("dcgm-init received shutdown signal")
+		log.Info("dcgm-init received shutdown signal")
 		cancel()
 	}()
 
@@ -96,41 +94,41 @@ func main() {
 		die(fmt.Sprintf("failed to create output directory %s: %v", outputDir, err))
 	}
 
-	if err := run(ctx, client, logger, *outputPath, *collectionFreq, *oneShot); err != nil {
+	if err := run(ctx, client, *outputPath, *collectionFreq, *oneShot); err != nil {
 		die(fmt.Sprintf("dcgm-init failed: %v", err))
 	}
 }
 
-func run(ctx context.Context, client gpu.Client, logger *zap.Logger, outputPath string, interval time.Duration, oneShot bool) error {
+func run(ctx context.Context, client gpu.Client, outputPath string, interval time.Duration, oneShot bool) error {
 	reinitialized, err := client.Reconcile(ctx)
 	if err != nil {
 		return fmt.Errorf("initial DCGM reconciliation failed: %w", err)
 	}
-	logger.Info("DCGM client reconciled", zap.Bool("reinitialized", reinitialized))
+	log.Infof("DCGM client reconciled: reinitialized=%v", reinitialized)
 
 	if oneShot {
-		return collectAndWrite(ctx, client, logger, outputPath)
+		return collectAndWrite(ctx, client, outputPath)
 	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	if err := collectAndWrite(ctx, client, logger, outputPath); err != nil {
-		logger.Warn("dcgm-init initial collection failed, will retry", zap.Error(err))
+	if err := collectAndWrite(ctx, client, outputPath); err != nil {
+		log.Warnf("dcgm-init initial collection failed, will retry: %v", err)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("dcgm-init is shutting down metrics collection")
+			log.Info("dcgm-init is shutting down metrics collection")
 			return nil
 		case <-ticker.C:
 			if _, err := client.Reconcile(ctx); err != nil {
-				logger.Warn("dcgm-init client reconciliation failed", zap.Error(err))
+				log.Warnf("dcgm-init client reconciliation failed: %v", err)
 				continue
 			}
-			if err := collectAndWrite(ctx, client, logger, outputPath); err != nil {
-				logger.Warn("dcgm-init metrics collection failed", zap.Error(err))
+			if err := collectAndWrite(ctx, client, outputPath); err != nil {
+				log.Warnf("dcgm-init metrics collection failed: %v", err)
 			}
 		}
 	}
@@ -152,7 +150,7 @@ type gpuMetricJSON struct {
 	RestartAppXidCount int64    `json:"restart_app_xid_count"`
 }
 
-func collectAndWrite(ctx context.Context, client gpu.Client, logger *zap.Logger, outputPath string) error {
+func collectAndWrite(ctx context.Context, client gpu.Client, outputPath string) error {
 	metrics, err := client.GetMetrics(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to collect GPU metrics: %w", err)
@@ -195,7 +193,7 @@ func collectAndWrite(ctx context.Context, client gpu.Client, logger *zap.Logger,
 		return fmt.Errorf("failed to rename %s to %s: %w", stagingPath, outputPath, err)
 	}
 
-	logger.Info("metrics written", zap.String("path", outputPath), zap.Int("gpuCount", len(gpus)))
+	log.Infof("metrics written: path=%s, gpuCount=%d", outputPath, len(gpus))
 	return nil
 }
 
@@ -228,6 +226,7 @@ func usage() {
 }
 
 func die(msg string) {
-	fmt.Fprintf(os.Stderr, "dcgm-init: %s\n", msg)
+	log.Error(msg)
+	log.Flush()
 	os.Exit(1)
 }
