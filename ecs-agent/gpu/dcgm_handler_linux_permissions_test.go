@@ -41,8 +41,6 @@ func TestGPUMetricsFile_ReadableByAgent(t *testing.T) {
 	}
 	writeMetricsFile(t, filePath, data)
 
-	os.Chmod(filePath, 0644)
-
 	handler := NewDCGMHandler(filePath)
 	metrics := handler.GetGPUMetrics()
 
