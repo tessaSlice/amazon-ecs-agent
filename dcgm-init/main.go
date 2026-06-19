@@ -49,23 +49,24 @@ func main() {
 	flag.Parse()
 
 	args := flag.Args()
-	if len(args) > 0 {
-		switch args[0] {
-		case START:
-			// Continue to normal daemon operation below.
-		case STOP:
-			// Stop is handled by systemd sending SIGTERM; nothing to do here.
-			os.Exit(0)
-		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s (use '%s' or '%s')\n", args[0], START, STOP)
-			os.Exit(1)
-		}
+	if len(args) == 0 {
+		usage()
+		os.Exit(1)
+	}
+
+	action, ok := actions()[args[0]]
+	if !ok {
+		usage()
+		os.Exit(1)
+	}
+
+	if action.immediate {
+		os.Exit(0)
 	}
 
 	logger, err := zap.NewProduction()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dcgm-init failed to create logger: %v\n", err)
-		os.Exit(1)
+		die(fmt.Sprintf("failed to create logger: %v", err))
 	}
 	defer logger.Sync()
 
@@ -92,13 +93,11 @@ func main() {
 	// Only dcgm-init (running as root) can write; ecs-agent reads via read-only bind mount.
 	outputDir := filepath.Dir(*outputPath)
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		logger.Error("dcgm-init failed to create output directory", zap.String("path", outputDir), zap.Error(err))
-		os.Exit(1)
+		die(fmt.Sprintf("failed to create output directory %s: %v", outputDir, err))
 	}
 
 	if err := run(ctx, client, logger, *outputPath, *collectionFreq, *oneShot); err != nil {
-		logger.Error("dcgm-init failed", zap.Error(err))
-		os.Exit(1)
+		die(fmt.Sprintf("dcgm-init failed: %v", err))
 	}
 }
 
@@ -198,4 +197,37 @@ func collectAndWrite(ctx context.Context, client gpu.Client, logger *zap.Logger,
 
 	logger.Info("metrics written", zap.String("path", outputPath), zap.Int("gpuCount", len(gpus)))
 	return nil
+}
+
+type action struct {
+	description string
+	immediate   bool // if true, exit immediately (no daemon work needed)
+}
+
+func actions() map[string]action {
+	return map[string]action{
+		START: {
+			description: "Start collecting GPU metrics",
+			immediate:   false,
+		},
+		STOP: {
+			description: "Stop collecting GPU metrics (handled by SIGTERM)",
+			immediate:   true,
+		},
+	}
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "Usage: %s [flags] COMMAND\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, " Available commands:\n")
+	for cmd, a := range actions() {
+		fmt.Fprintf(os.Stderr, "  %-10s  %s\n", cmd, a.description)
+	}
+	fmt.Fprintf(os.Stderr, "\n")
+}
+
+func die(msg string) {
+	fmt.Fprintf(os.Stderr, "dcgm-init: %s\n", msg)
+	os.Exit(1)
 }
