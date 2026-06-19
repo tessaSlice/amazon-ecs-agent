@@ -111,6 +111,57 @@ func TestGPUMetricsNotEmittedBeforeThirdTick(t *testing.T) {
 	assert.NotNil(t, engine.currentGPUMetrics, "Should emit on third tick")
 }
 
+func TestGPUMetricsNotEmittedWhenTimestampGoesBackward(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	// Write metrics with a recent timestamp
+	writeGPUMetricsFile(t, filePath, "2026-01-01T00:05:00Z", 90.0)
+
+	telemetryMessages := make(chan ecstcs.TelemetryMessage, 10)
+	healthMessages := make(chan ecstcs.HealthMessage, 10)
+
+	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
+	engine.ctx, _ = context.WithCancel(context.Background())
+	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
+
+	// First emission succeeds (new timestamp)
+	engine.gpuMetricsPublishCount = 2
+	engine.publishMetrics(false)
+	assert.NotNil(t, engine.currentGPUMetrics)
+	assert.Equal(t, "2026-01-01T00:05:00Z", engine.lastGPUTimestamp)
+
+	// Write metrics with an OLDER timestamp (clock skew, file corruption, etc.)
+	writeGPUMetricsFile(t, filePath, "2026-01-01T00:03:00Z", 10.0)
+
+	// Should NOT emit because timestamp is older than lastGPUTimestamp
+	engine.gpuMetricsPublishCount = 2
+	engine.publishMetrics(false)
+	assert.Nil(t, engine.currentGPUMetrics,
+		"Should not emit metrics when file timestamp is older than last emitted timestamp")
+	assert.Equal(t, "2026-01-01T00:05:00Z", engine.lastGPUTimestamp,
+		"lastGPUTimestamp should remain at the newer value")
+
+	// Write metrics with the same timestamp as the last emitted (equal, not greater)
+	writeGPUMetricsFile(t, filePath, "2026-01-01T00:05:00Z", 50.0)
+
+	// Should NOT emit because timestamp is equal (not strictly greater)
+	engine.gpuMetricsPublishCount = 2
+	engine.publishMetrics(false)
+	assert.Nil(t, engine.currentGPUMetrics,
+		"Should not emit metrics when file timestamp equals last emitted timestamp")
+
+	// Write metrics with a newer timestamp — should emit
+	writeGPUMetricsFile(t, filePath, "2026-01-01T00:06:00Z", 100.0)
+
+	engine.gpuMetricsPublishCount = 2
+	engine.publishMetrics(false)
+	assert.NotNil(t, engine.currentGPUMetrics,
+		"Should emit metrics when file timestamp is strictly newer")
+	assert.Equal(t, "2026-01-01T00:06:00Z", engine.lastGPUTimestamp)
+	assert.Equal(t, 100.0, *engine.currentGPUMetrics[0].GPUUtilization)
+}
+
 func writeGPUMetricsFile(t *testing.T, path string, timestamp string, utilization float64) {
 	t.Helper()
 	data := gpu.GPUMetricsFileData{
