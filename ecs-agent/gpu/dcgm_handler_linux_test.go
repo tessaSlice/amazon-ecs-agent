@@ -80,7 +80,6 @@ func TestDCGMHandlerValidFile(t *testing.T) {
 				RestartAppXidCount: 0,
 			},
 		},
-		Healthy: true,
 	}
 
 	writeMetricsFile(t, filePath, data)
@@ -149,7 +148,6 @@ func TestDCGMHandlerMultipleGPUs(t *testing.T) {
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs:      expectedGPUs,
-		Healthy:   true,
 	}
 
 	writeMetricsFile(t, filePath, data)
@@ -219,8 +217,7 @@ func TestDCGMHandlerFractionalGPUMissingFields(t *testing.T) {
       "memory_used_bytes": 0,
       "restart_app_xid_count": 0
     }
-  ],
-  "healthy": true
+  ]
 }`, time.Now().UTC().Format(time.RFC3339), testGPUUUIDFractional, testFractionalUtil, testFractionalMemUtil, testFractionalMem)
 
 	err := os.WriteFile(filePath, []byte(rawJSON), 0644)
@@ -256,7 +253,6 @@ func TestDCGMHandlerReturnsNilOnUnchangedTimestamp(t *testing.T) {
 		GPUs: []GPUMetric{
 			{GPUUUID: testGPUUUID0, GPUUtilization: aws.Float64(testUtilization0)},
 		},
-		Healthy: true,
 	}
 	writeMetricsFile(t, filePath, data)
 

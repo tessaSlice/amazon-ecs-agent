@@ -58,7 +58,7 @@ func main() {
 
 	logger, err := zap.NewProduction()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create logger: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dcgm-init failed to create logger: %v\n", err)
 		os.Exit(1)
 	}
 	defer logger.Sync()
@@ -78,7 +78,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		logger.Info("received shutdown signal")
+		logger.Info("dcgm-init received shutdown signal")
 		cancel()
 	}()
 
@@ -86,7 +86,7 @@ func main() {
 	// Only dcgm-init (running as root) can write; ecs-agent reads via read-only bind mount.
 	outputDir := filepath.Dir(*outputPath)
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		logger.Error("failed to create output directory", zap.String("path", outputDir), zap.Error(err))
+		logger.Error("dcgm-init failed to create output directory", zap.String("path", outputDir), zap.Error(err))
 		os.Exit(1)
 	}
 
@@ -111,42 +111,40 @@ func run(ctx context.Context, client gpu.Client, logger *zap.Logger, outputPath 
 	defer ticker.Stop()
 
 	if err := collectAndWrite(ctx, client, logger, outputPath); err != nil {
-		logger.Warn("initial collection failed, will retry", zap.Error(err))
+		logger.Warn("dcgm-init initial collection failed, will retry", zap.Error(err))
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("shutting down metrics collection")
+			logger.Info("dcgm-init is shutting down metrics collection")
 			return nil
 		case <-ticker.C:
 			if _, err := client.Reconcile(ctx); err != nil {
-				logger.Warn("reconciliation failed", zap.Error(err))
+				logger.Warn("dcgm-init client reconciliation failed", zap.Error(err))
 				continue
 			}
 			if err := collectAndWrite(ctx, client, logger, outputPath); err != nil {
-				logger.Warn("metrics collection failed", zap.Error(err))
+				logger.Warn("dcgm-init metrics collection failed", zap.Error(err))
 			}
 		}
 	}
 }
 
 type metricsOutput struct {
-	Timestamp string           `json:"timestamp"`
-	GPUs      []gpuMetricJSON  `json:"gpus"`
-	Healthy   bool             `json:"healthy"`
-	Reason    string           `json:"unhealthy_reason,omitempty"`
+	Timestamp string          `json:"timestamp"`
+	GPUs      []gpuMetricJSON `json:"gpus"`
 }
 
 type gpuMetricJSON struct {
-	GPUUUID           string   `json:"gpu_uuid"`
-	GPUUtilization    *float64 `json:"gpu_utilization_percent,omitempty"`
-	MemoryUtilization *float64 `json:"memory_utilization_percent,omitempty"`
-	MemoryTotal       *uint64  `json:"memory_total_bytes,omitempty"`
-	MemoryUsed        *uint64  `json:"memory_used_bytes,omitempty"`
-	PowerDraw         *float64 `json:"power_draw_watts,omitempty"`
-	Temperature       *float64 `json:"temperature_celsius,omitempty"`
-	RestartAppXidCount int64   `json:"restart_app_xid_count"`
+	GPUUUID            string   `json:"gpu_uuid"`
+	GPUUtilization     *float64 `json:"gpu_utilization_percent,omitempty"`
+	MemoryUtilization  *float64 `json:"memory_utilization_percent,omitempty"`
+	MemoryTotal        *uint64  `json:"memory_total_bytes,omitempty"`
+	MemoryUsed         *uint64  `json:"memory_used_bytes,omitempty"`
+	PowerDraw          *float64 `json:"power_draw_watts,omitempty"`
+	Temperature        *float64 `json:"temperature_celsius,omitempty"`
+	RestartAppXidCount int64    `json:"restart_app_xid_count"`
 }
 
 func collectAndWrite(ctx context.Context, client gpu.Client, logger *zap.Logger, outputPath string) error {
@@ -172,8 +170,6 @@ func collectAndWrite(ctx context.Context, client gpu.Client, logger *zap.Logger,
 	output := metricsOutput{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs:      gpus,
-		Healthy:   client.IsHealthy(),
-		Reason:    client.UnhealthyReason(),
 	}
 
 	data, err := json.MarshalIndent(output, "", "  ")

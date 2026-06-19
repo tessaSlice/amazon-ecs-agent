@@ -31,10 +31,8 @@ const (
 
 // GPUMetricsFileData represents the JSON structure written by dcgm-init.
 type GPUMetricsFileData struct {
-	Timestamp       string      `json:"timestamp"`
-	GPUs            []GPUMetric `json:"gpus"`
-	Healthy         bool        `json:"healthy"`
-	UnhealthyReason string      `json:"unhealthy_reason,omitempty"`
+	Timestamp string      `json:"timestamp"`
+	GPUs      []GPUMetric `json:"gpus"`
 }
 
 // DCGMHandler reads GPU metrics from the shared file written by dcgm-init
