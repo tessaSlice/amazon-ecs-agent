@@ -232,6 +232,51 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_NilPowerAndTemp(t *testing.T) {
 	assert.Nil(t, metrics[0].Temperature, "Fractional vGPU should not report temperature")
 }
 
+// TestDCGMHandler_GetGPUMetrics_FractionalGPU_MissingFieldsInJSON verifies that
+// when dcgm-init writes JSON without power_draw_watts and temperature_celsius fields
+// (as happens on g6f fractional vGPU instances), the handler correctly parses them
+// as nil rather than zero values.
+func TestDCGMHandler_GetGPUMetrics_FractionalGPU_MissingFieldsInJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	// Write raw JSON exactly as dcgm-init would on a g6f instance —
+	// power_draw_watts and temperature_celsius are completely absent (not null).
+	rawJSON := `{
+  "timestamp": "` + time.Now().UTC().Format(time.RFC3339) + `",
+  "gpus": [
+    {
+      "gpu_uuid": "GPU-fractional-raw",
+      "gpu_utilization_percent": 0,
+      "memory_utilization_percent": 7.5,
+      "memory_total_bytes": 6442450944,
+      "memory_used_bytes": 0,
+      "restart_app_xid_count": 0
+    }
+  ],
+  "healthy": true
+}`
+	err := os.WriteFile(filePath, []byte(rawJSON), 0644)
+	require.NoError(t, err)
+
+	handler := NewDCGMHandler(filePath)
+	metrics := handler.GetGPUMetrics()
+
+	require.Len(t, metrics, 1)
+	assert.Equal(t, "GPU-fractional-raw", metrics[0].GPUUUID)
+	assert.NotNil(t, metrics[0].GPUUtilization)
+	assert.Equal(t, 0.0, *metrics[0].GPUUtilization)
+	assert.NotNil(t, metrics[0].MemoryUtilization)
+	assert.Equal(t, testFractionalMemUtil, *metrics[0].MemoryUtilization)
+	assert.NotNil(t, metrics[0].MemoryTotal)
+	assert.Equal(t, testFractionalMem, *metrics[0].MemoryTotal)
+	assert.Nil(t, metrics[0].PowerDraw,
+		"PowerDraw should be nil when field is absent from JSON (not zero)")
+	assert.Nil(t, metrics[0].Temperature,
+		"Temperature should be nil when field is absent from JSON (not zero)")
+	assert.Equal(t, int64(0), metrics[0].RestartAppXidCount)
+}
+
 // TestDCGMHandler_GetGPUMetrics_InvalidTimestamp verifies that the handler rejects
 // a file with an unparseable timestamp (corrupt file protection).
 func TestDCGMHandler_GetGPUMetrics_InvalidTimestamp(t *testing.T) {
