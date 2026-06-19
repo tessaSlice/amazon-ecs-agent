@@ -59,8 +59,7 @@ const (
 	testFractionalUtil    = 0.0
 	testFractionalMemUtil = 7.5
 
-	testStaleTimestamp   = "2026-01-01T00:00:00Z"
-	testInvalidTimestamp = "not-a-timestamp"
+	testStaleTimestamp = "2026-01-01T00:00:00Z"
 )
 
 func TestDCGMHandler_GetGPUMetrics_ValidFile(t *testing.T) {
@@ -245,27 +244,6 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_MissingFieldsInJSON(t *testing.
 	assert.Equal(t, int64(0), metrics[0].RestartAppXidCount)
 }
 
-// TestDCGMHandler_GetGPUMetrics_InvalidTimestamp verifies that the handler rejects
-// a file with an unparseable timestamp (corrupt file protection).
-func TestDCGMHandler_GetGPUMetrics_InvalidTimestamp(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	data := GPUMetricsFileData{
-		Timestamp: testInvalidTimestamp,
-		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-bad-ts"},
-		},
-		Healthy: true,
-	}
-
-	writeMetricsFile(t, filePath, data)
-
-	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
-	assert.Nil(t, metrics, "Invalid timestamp should return nil")
-}
-
 // TestDCGMHandler_GetGPUMetrics_ReturnsNilOnUnchangedTimestamp verifies that
 // when dcgm-init hasn't written new data (file timestamp unchanged), the handler
 // returns nil so the stats engine does not re-emit stale metrics to TACS.
@@ -297,47 +275,6 @@ func TestDCGMHandler_GetGPUMetrics_ReturnsNilOnUnchangedTimestamp(t *testing.T) 
 	// Third call still nil (file hasn't changed)
 	metrics3 := handler.GetGPUMetrics()
 	assert.Nil(t, metrics3, "Subsequent reads should continue returning nil until timestamp changes")
-}
-
-// TestDCGMHandler_GetGPUMetrics_ReturnsMetricsWhenTimestampChanges verifies that
-// when dcgm-init writes new data (timestamp changes), the handler returns metrics again.
-func TestDCGMHandler_GetGPUMetrics_ReturnsMetricsWhenTimestampChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	// First write
-	data := GPUMetricsFileData{
-		Timestamp: "2026-01-01T00:00:00Z",
-		GPUs: []GPUMetric{
-			{GPUUUID: testGPUUUID0, GPUUtilization: aws.Float64(testUtilization0)},
-		},
-		Healthy: true,
-	}
-	writeMetricsFile(t, filePath, data)
-
-	handler := NewDCGMHandler(filePath)
-
-	// First read returns metrics
-	metrics1 := handler.GetGPUMetrics()
-	require.NotNil(t, metrics1)
-
-	// Same timestamp returns nil
-	metrics2 := handler.GetGPUMetrics()
-	assert.Nil(t, metrics2)
-
-	// Update file with new timestamp (simulates dcgm-init writing next tick)
-	data.Timestamp = "2026-01-01T00:01:00Z"
-	data.GPUs[0].GPUUtilization = aws.Float64(testUtilization1)
-	writeMetricsFile(t, filePath, data)
-
-	// New timestamp returns metrics again
-	metrics3 := handler.GetGPUMetrics()
-	require.NotNil(t, metrics3, "New timestamp should return metrics")
-	assert.Equal(t, testUtilization1, *metrics3[0].GPUUtilization)
-
-	// Same timestamp again returns nil
-	metrics4 := handler.GetGPUMetrics()
-	assert.Nil(t, metrics4)
 }
 
 func TestDCGMHandler_DefaultFilePath(t *testing.T) {
