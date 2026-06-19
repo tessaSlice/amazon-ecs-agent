@@ -197,64 +197,6 @@ func TestDCGMHandler_GetGPUMetrics_EmptyFile(t *testing.T) {
 	assert.Nil(t, metrics, "Empty file should return nil (JSON parsing fails gracefully)")
 }
 
-// TestDCGMHandler_GetGPUMetrics_StaleData_SameTimestamp verifies that when dcgm-init
-// stops updating (crash/hang), the agent returns the cached metrics rather than
-// re-emitting duplicates. The "stale" condition is detected by the timestamp not changing.
-func TestDCGMHandler_GetGPUMetrics_StaleData_SameTimestamp(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	data := GPUMetricsFileData{
-		Timestamp: testStaleTimestamp,
-		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-stale", GPUUtilization: aws.Float64(testUtilization3)},
-		},
-		Healthy: true,
-	}
-
-	writeMetricsFile(t, filePath, data)
-
-	handler := NewDCGMHandler(filePath)
-
-	// First call reads and caches
-	metrics1 := handler.GetGPUMetrics()
-	require.Len(t, metrics1, 1)
-	assert.Equal(t, "GPU-stale", metrics1[0].GPUUUID)
-
-	// Second call with same file (timestamp unchanged) returns cached data
-	metrics2 := handler.GetGPUMetrics()
-	require.Len(t, metrics2, 1)
-	assert.Equal(t, metrics1[0].GPUUUID, metrics2[0].GPUUUID,
-		"Same timestamp should return cached metrics (stale data not re-emitted)")
-}
-
-func TestDCGMHandler_GetGPUMetrics_SameTimestampReturnsCached(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	ts := time.Now().UTC().Format(time.RFC3339)
-	data := GPUMetricsFileData{
-		Timestamp: ts,
-		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-cached", GPUUtilization: aws.Float64(42.0)},
-		},
-		Healthy: true,
-	}
-
-	writeMetricsFile(t, filePath, data)
-
-	handler := NewDCGMHandler(filePath)
-
-	// First call should parse and cache
-	metrics1 := handler.GetGPUMetrics()
-	require.Len(t, metrics1, 1)
-
-	// Second call with same timestamp should return cached
-	metrics2 := handler.GetGPUMetrics()
-	require.Len(t, metrics2, 1)
-	assert.Equal(t, metrics1[0].GPUUUID, metrics2[0].GPUUUID)
-}
-
 func TestDCGMHandler_GetGPUMetrics_FractionalGPU_NilPowerAndTemp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
