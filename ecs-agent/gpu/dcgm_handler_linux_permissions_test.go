@@ -16,7 +16,6 @@
 package gpu
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -46,54 +45,4 @@ func TestGPUMetricsFile_ReadableByAgent(t *testing.T) {
 
 	require.Len(t, metrics, 1, "Agent should be able to read GPU metrics file with 0644 perms")
 	assert.Equal(t, "GPU-read-test", metrics[0].GPUUUID)
-}
-
-// TestGPUMetricsDir_MkdirAllIdempotent verifies that dcgm-init does not fail
-// if the output directory already exists (race condition where ecs-init creates
-// the directory before dcgm-init starts).
-func TestGPUMetricsDir_MkdirAllIdempotent(t *testing.T) {
-	tmpDir := t.TempDir()
-	metricsDir := filepath.Join(tmpDir, "ecs")
-
-	err := os.MkdirAll(metricsDir, 0755)
-	require.NoError(t, err)
-
-	info, err := os.Stat(metricsDir)
-	require.NoError(t, err)
-	require.True(t, info.IsDir())
-
-	// Simulate dcgm-init calling MkdirAll on the same path (should not fail)
-	err = os.MkdirAll(metricsDir, 0755)
-	assert.NoError(t, err, "MkdirAll should not fail when directory already exists")
-
-	info, err = os.Stat(metricsDir)
-	require.NoError(t, err)
-	assert.True(t, info.IsDir())
-	assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
-}
-
-// TestGPUMetricsDir_ConcurrentCreation simulates a race condition where both
-// ecs-init and dcgm-init attempt to create the directory concurrently.
-func TestGPUMetricsDir_ConcurrentCreation(t *testing.T) {
-	tmpDir := t.TempDir()
-	metricsDir := filepath.Join(tmpDir, "ecs")
-
-	const goroutines = 10
-	errs := make(chan error, goroutines)
-
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			errs <- os.MkdirAll(metricsDir, 0755)
-		}()
-	}
-
-	for i := 0; i < goroutines; i++ {
-		err := <-errs
-		assert.NoError(t, err, "Concurrent MkdirAll should never fail")
-	}
-
-	info, err := os.Stat(metricsDir)
-	require.NoError(t, err)
-	assert.True(t, info.IsDir())
-	assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
 }
