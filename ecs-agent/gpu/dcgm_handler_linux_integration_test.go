@@ -27,6 +27,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Integration test constants.
+const (
+	integGPUUUID       = "GPU-aaaa-1111"
+	integContainerName = "gpu-workload"
+	integTaskArn       = "arn:aws:ecs:us-west-2:123456789:task/cluster/task-id"
+
+	integUtilization = 95.0
+	integMemUtil     = 60.0
+	integMemTotal    = uint64(16106127360)
+	integMemUsed     = uint64(9663676416)
+	integPowerDraw   = 280.0
+	integTemperature = 78.0
+	integXidCount    = int64(1)
+
+	// Multi-GPU test constants (4-GPU instance like g4dn.12xlarge)
+	multiGPU0UUID = "GPU-0"
+	multiGPU1UUID = "GPU-1"
+	multiGPU2UUID = "GPU-2"
+	multiGPU3UUID = "GPU-3"
+
+	multiGPU0Util  = 100.0
+	multiGPU1Util  = 80.0
+	multiGPU2Util  = 50.0
+	multiGPU3Util  = 0.0
+	multiGPU0Power = 70.0
+	multiGPU1Power = 65.0
+	multiGPU2Power = 50.0
+	multiGPU3Power = 9.0
+	multiGPU0Temp  = 60.0
+	multiGPU1Temp  = 55.0
+	multiGPU2Temp  = 50.0
+	multiGPU3Temp  = 35.0
+
+	multiGPUCount        = 4
+	multiGPUUsageTotal   = int64(3)
+	multiGPUIdleUsage    = int64(0)
+	multiGPUNonExistent  = "GPU-nonexistent"
+	integDimensionKey    = "AcceleratedDevice"
+	integMetricCount     = 7
+	integStaleTimestamp  = "2026-01-01T00:00:00Z"
+	integStaleUtil       = 99.0
+	integUnitCount       = "Count"
+)
+
 // TestGPUMetrics_PopulatesTACSPayload_WhenAvailable verifies that the GPU metrics
 // collector correctly populates the TACS payload (GeneralMetricsWrapper) when a
 // mock dcgm-init reports valid metrics via the shared file.
@@ -34,48 +78,44 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// Simulate dcgm-init writing valid metrics
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs: []GPUMetric{
 			{
-				GPUUUID:            "GPU-aaaa-1111",
-				GPUUtilization:     aws.Float64(95.0),
-				MemoryUtilization:  aws.Float64(60.0),
-				MemoryTotal:        aws.Uint64(16106127360),
-				MemoryUsed:         aws.Uint64(9663676416),
-				PowerDraw:          aws.Float64(280.0),
-				Temperature:        aws.Float64(78.0),
-				RestartAppXidCount: 1,
+				GPUUUID:            integGPUUUID,
+				GPUUtilization:     aws.Float64(integUtilization),
+				MemoryUtilization:  aws.Float64(integMemUtil),
+				MemoryTotal:        aws.Uint64(integMemTotal),
+				MemoryUsed:         aws.Uint64(integMemUsed),
+				PowerDraw:          aws.Float64(integPowerDraw),
+				Temperature:        aws.Float64(integTemperature),
+				RestartAppXidCount: integXidCount,
 			},
 		},
 		Healthy: true,
 	}
 	writeMetricsFile(t, filePath, data)
 
-	// Simulate the agent reading and building a TACS payload
 	handler := NewDCGMHandler(filePath)
 	gpuMetrics := handler.GetGPUMetrics()
 	require.NotNil(t, gpuMetrics, "GPU metrics should be available")
 
 	// Build container-level payload (as the stats engine would)
-	containerPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-aaaa-1111"})
+	containerPayload := GPUMetricsForContainer(gpuMetrics, []string{integGPUUUID})
 	require.NotNil(t, containerPayload)
 
-	// Simulate attaching to ContainerMetric
 	containerMetric := &ecstcs.ContainerMetric{
-		ContainerName:         aws.String("gpu-workload"),
+		ContainerName:         aws.String(integContainerName),
 		GeneralMetricsPayload: containerPayload,
 	}
 
-	// Verify the TACS payload structure is correct
 	require.NotNil(t, containerMetric.GeneralMetricsPayload)
 	require.Len(t, containerMetric.GeneralMetricsPayload, 1)
 
 	wrapper := containerMetric.GeneralMetricsPayload[0]
-	assert.Equal(t, "AcceleratedDevice", *wrapper.Dimensions[0].Key)
-	assert.Equal(t, "GPU-aaaa-1111", *wrapper.Dimensions[0].Value)
-	assert.Len(t, wrapper.GeneralMetrics, 7)
+	assert.Equal(t, integDimensionKey, *wrapper.Dimensions[0].Key)
+	assert.Equal(t, integGPUUUID, *wrapper.Dimensions[0].Value)
+	assert.Len(t, wrapper.GeneralMetrics, integMetricCount)
 
 	// Build instance-level payload
 	instancePayload := GPUMetricsToInstancePayload(gpuMetrics, 1)
@@ -88,13 +128,12 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 		InstanceMetrics: instanceMetrics,
 		TaskMetrics: []*ecstcs.TaskMetric{
 			{
-				TaskArn:          aws.String("arn:aws:ecs:us-west-2:123456789:task/cluster/task-id"),
+				TaskArn:          aws.String(integTaskArn),
 				ContainerMetrics: []*ecstcs.ContainerMetric{containerMetric},
 			},
 		},
 	}
 
-	// Verify the full TelemetryMessage
 	require.NotNil(t, telemetryMessage.InstanceMetrics)
 	require.Len(t, telemetryMessage.InstanceMetrics.GeneralMetricsPayload, 1)
 	require.Len(t, telemetryMessage.TaskMetrics, 1)
@@ -107,36 +146,32 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 	assert.Contains(t, string(jsonBytes), "GPUUtilization")
 	assert.Contains(t, string(jsonBytes), "GPUTemperature")
 	assert.Contains(t, string(jsonBytes), "InstanceGPULimit")
-	assert.Contains(t, string(jsonBytes), "GPU-aaaa-1111")
+	assert.Contains(t, string(jsonBytes), integGPUUUID)
 }
 
 // TestGPUMetrics_OmittedFromPayload_WhenNoGPUs verifies that the handler correctly
 // omits GPU metrics when there are no GPUs available (file doesn't exist).
 func TestGPUMetrics_OmittedFromPayload_WhenNoGPUs(t *testing.T) {
-	// Point to a nonexistent file (simulates non-GPU instance or dcgm-init not running)
 	handler := NewDCGMHandler("/nonexistent/gpu-metrics.json")
 	gpuMetrics := handler.GetGPUMetrics()
 
 	assert.Nil(t, gpuMetrics, "Should return nil when no GPU metrics file exists")
 
-	// Container payload should be nil
 	containerPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-any"})
 	assert.Nil(t, containerPayload, "Container payload should be nil when no GPU metrics")
 
-	// Instance payload should be nil
 	instancePayload := GPUMetricsToInstancePayload(gpuMetrics, 0)
 	assert.Nil(t, instancePayload, "Instance payload should be nil when no GPU metrics")
 
-	// TelemetryMessage should have nil InstanceMetrics (no GPU data to report)
 	telemetryMessage := ecstcs.TelemetryMessage{
 		InstanceMetrics: nil,
 		TaskMetrics: []*ecstcs.TaskMetric{
 			{
-				TaskArn: aws.String("arn:aws:ecs:us-west-2:123456789:task/cluster/task-id"),
+				TaskArn: aws.String(integTaskArn),
 				ContainerMetrics: []*ecstcs.ContainerMetric{
 					{
 						ContainerName:         aws.String("non-gpu-container"),
-						GeneralMetricsPayload: nil, // No GPU metrics attached
+						GeneralMetricsPayload: nil,
 					},
 				},
 			},
@@ -153,14 +188,13 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// 4-GPU instance (like g4dn.12xlarge)
 	data := GPUMetricsFileData{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-0", GPUUtilization: aws.Float64(100.0), PowerDraw: aws.Float64(70.0), Temperature: aws.Float64(60.0)},
-			{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(80.0), PowerDraw: aws.Float64(65.0), Temperature: aws.Float64(55.0)},
-			{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(50.0), PowerDraw: aws.Float64(50.0), Temperature: aws.Float64(50.0)},
-			{GPUUUID: "GPU-3", GPUUtilization: aws.Float64(0.0), PowerDraw: aws.Float64(9.0), Temperature: aws.Float64(35.0)},
+			{GPUUUID: multiGPU0UUID, GPUUtilization: aws.Float64(multiGPU0Util), PowerDraw: aws.Float64(multiGPU0Power), Temperature: aws.Float64(multiGPU0Temp)},
+			{GPUUUID: multiGPU1UUID, GPUUtilization: aws.Float64(multiGPU1Util), PowerDraw: aws.Float64(multiGPU1Power), Temperature: aws.Float64(multiGPU1Temp)},
+			{GPUUUID: multiGPU2UUID, GPUUtilization: aws.Float64(multiGPU2Util), PowerDraw: aws.Float64(multiGPU2Power), Temperature: aws.Float64(multiGPU2Temp)},
+			{GPUUUID: multiGPU3UUID, GPUUtilization: aws.Float64(multiGPU3Util), PowerDraw: aws.Float64(multiGPU3Power), Temperature: aws.Float64(multiGPU3Temp)},
 		},
 		Healthy: true,
 	}
@@ -168,53 +202,51 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 
 	handler := NewDCGMHandler(filePath)
 	gpuMetrics := handler.GetGPUMetrics()
-	require.Len(t, gpuMetrics, 4)
+	require.Len(t, gpuMetrics, multiGPUCount)
 
 	// Container A has GPUs 0 and 1
-	containerAPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-0", "GPU-1"})
+	containerAPayload := GPUMetricsForContainer(gpuMetrics, []string{multiGPU0UUID, multiGPU1UUID})
 	require.Len(t, containerAPayload, 2)
 
-	// Verify Container A's GPU-0 metrics are correct
 	aGPU0 := containerAPayload[0]
-	assert.Equal(t, "AcceleratedDevice", *aGPU0.Dimensions[0].Key)
-	assert.Equal(t, "GPU-0", *aGPU0.Dimensions[0].Value)
+	assert.Equal(t, integDimensionKey, *aGPU0.Dimensions[0].Key)
+	assert.Equal(t, multiGPU0UUID, *aGPU0.Dimensions[0].Value)
 	for _, gm := range aGPU0.GeneralMetrics {
 		switch *gm.MetricName {
 		case "GPUUtilization":
-			assert.Equal(t, 100.0, *gm.MetricValueDouble, "GPU-0 utilization should be 100%%")
+			assert.Equal(t, multiGPU0Util, *gm.MetricValueDouble)
 		case "GPUPowerDraw":
-			assert.Equal(t, 70.0, *gm.MetricValueDouble, "GPU-0 power should be 70W")
+			assert.Equal(t, multiGPU0Power, *gm.MetricValueDouble)
 		case "GPUTemperature":
-			assert.Equal(t, 60.0, *gm.MetricValueDouble, "GPU-0 temp should be 60C")
+			assert.Equal(t, multiGPU0Temp, *gm.MetricValueDouble)
 		}
 	}
 
-	// Verify Container A's GPU-1 metrics are correct
 	aGPU1 := containerAPayload[1]
-	assert.Equal(t, "GPU-1", *aGPU1.Dimensions[0].Value)
+	assert.Equal(t, multiGPU1UUID, *aGPU1.Dimensions[0].Value)
 	for _, gm := range aGPU1.GeneralMetrics {
 		switch *gm.MetricName {
 		case "GPUUtilization":
-			assert.Equal(t, 80.0, *gm.MetricValueDouble, "GPU-1 utilization should be 80%%")
+			assert.Equal(t, multiGPU1Util, *gm.MetricValueDouble)
 		case "GPUPowerDraw":
-			assert.Equal(t, 65.0, *gm.MetricValueDouble, "GPU-1 power should be 65W")
+			assert.Equal(t, multiGPU1Power, *gm.MetricValueDouble)
 		case "GPUTemperature":
-			assert.Equal(t, 55.0, *gm.MetricValueDouble, "GPU-1 temp should be 55C")
+			assert.Equal(t, multiGPU1Temp, *gm.MetricValueDouble)
 		}
 	}
 
 	// Container B has GPU 2
-	containerBPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-2"})
+	containerBPayload := GPUMetricsForContainer(gpuMetrics, []string{multiGPU2UUID})
 	require.Len(t, containerBPayload, 1)
-	assert.Equal(t, "GPU-2", *containerBPayload[0].Dimensions[0].Value)
+	assert.Equal(t, multiGPU2UUID, *containerBPayload[0].Dimensions[0].Value)
 	for _, gm := range containerBPayload[0].GeneralMetrics {
 		switch *gm.MetricName {
 		case "GPUUtilization":
-			assert.Equal(t, 50.0, *gm.MetricValueDouble, "GPU-2 utilization should be 50%%")
+			assert.Equal(t, multiGPU2Util, *gm.MetricValueDouble)
 		case "GPUPowerDraw":
-			assert.Equal(t, 50.0, *gm.MetricValueDouble, "GPU-2 power should be 50W")
+			assert.Equal(t, multiGPU2Power, *gm.MetricValueDouble)
 		case "GPUTemperature":
-			assert.Equal(t, 50.0, *gm.MetricValueDouble, "GPU-2 temp should be 50C")
+			assert.Equal(t, multiGPU2Temp, *gm.MetricValueDouble)
 		}
 	}
 
@@ -223,37 +255,37 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 	assert.Nil(t, containerCPayload)
 
 	// Container D requests a GPU that doesn't exist on the instance
-	containerDPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-nonexistent"})
+	containerDPayload := GPUMetricsForContainer(gpuMetrics, []string{multiGPUNonExistent})
 	assert.Nil(t, containerDPayload, "Requesting a non-existent GPU should return nil")
 
 	// GPU-3 is unassigned — should not appear in any container payload
 	allAssigned := append(containerAPayload, containerBPayload...)
 	for _, wrapper := range allAssigned {
-		assert.NotEqual(t, "GPU-3", *wrapper.Dimensions[0].Value,
+		assert.NotEqual(t, multiGPU3UUID, *wrapper.Dimensions[0].Value,
 			"Unassigned GPU-3 should not appear in any container's payload")
 	}
 
 	// Verify GPU-3 can be retrieved if explicitly requested
-	unassignedPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-3"})
+	unassignedPayload := GPUMetricsForContainer(gpuMetrics, []string{multiGPU3UUID})
 	require.Len(t, unassignedPayload, 1)
-	assert.Equal(t, "GPU-3", *unassignedPayload[0].Dimensions[0].Value)
+	assert.Equal(t, multiGPU3UUID, *unassignedPayload[0].Dimensions[0].Value)
 	for _, gm := range unassignedPayload[0].GeneralMetrics {
 		switch *gm.MetricName {
 		case "GPUUtilization":
-			assert.Equal(t, 0.0, *gm.MetricValueDouble, "GPU-3 should be idle")
+			assert.Equal(t, multiGPU3Util, *gm.MetricValueDouble)
 		case "GPUPowerDraw":
-			assert.Equal(t, 9.0, *gm.MetricValueDouble, "GPU-3 idle power should be 9W")
+			assert.Equal(t, multiGPU3Power, *gm.MetricValueDouble)
 		case "GPUTemperature":
-			assert.Equal(t, 35.0, *gm.MetricValueDouble, "GPU-3 idle temp should be 35C")
+			assert.Equal(t, multiGPU3Temp, *gm.MetricValueDouble)
 		}
 	}
 
-	// Verify all 4 GPUs can be retrieved at once (full instance query)
-	allGPUsPayload := GPUMetricsForContainer(gpuMetrics, []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"})
-	require.Len(t, allGPUsPayload, 4, "Should return all 4 GPUs when all UUIDs requested")
+	// Verify all 4 GPUs can be retrieved at once
+	allGPUsPayload := GPUMetricsForContainer(gpuMetrics, []string{multiGPU0UUID, multiGPU1UUID, multiGPU2UUID, multiGPU3UUID})
+	require.Len(t, allGPUsPayload, multiGPUCount, "Should return all 4 GPUs when all UUIDs requested")
 
-	// Instance-level should still report all 4 GPUs as the limit
-	instancePayload := GPUMetricsToInstancePayload(gpuMetrics, 3) // 3 GPUs assigned across containers
+	// Instance-level should report all 4 GPUs as the limit
+	instancePayload := GPUMetricsToInstancePayload(gpuMetrics, multiGPUUsageTotal)
 	require.NotNil(t, instancePayload)
 	require.Len(t, instancePayload, 1)
 	require.Len(t, instancePayload[0].GeneralMetrics, 2)
@@ -263,38 +295,35 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 		switch *gm.MetricName {
 		case "InstanceGPULimit":
 			limit = *gm.MetricValueLong
-			assert.Equal(t, "Count", *gm.Unit)
+			assert.Equal(t, integUnitCount, *gm.Unit)
 		case "InstanceGPUUsageTotal":
 			usage = *gm.MetricValueLong
-			assert.Equal(t, "Count", *gm.Unit)
+			assert.Equal(t, integUnitCount, *gm.Unit)
 		}
 	}
-	assert.Equal(t, int64(4), limit, "All 4 GPUs on the instance")
-	assert.Equal(t, int64(3), usage, "3 GPUs assigned to task containers")
+	assert.Equal(t, int64(multiGPUCount), limit)
+	assert.Equal(t, multiGPUUsageTotal, usage)
 
 	// Verify instance payload with 0 usage (no tasks running)
-	idleInstancePayload := GPUMetricsToInstancePayload(gpuMetrics, 0)
+	idleInstancePayload := GPUMetricsToInstancePayload(gpuMetrics, multiGPUIdleUsage)
 	require.NotNil(t, idleInstancePayload)
 	for _, gm := range idleInstancePayload[0].GeneralMetrics {
 		if *gm.MetricName == "InstanceGPUUsageTotal" {
-			assert.Equal(t, int64(0), *gm.MetricValueLong, "No GPUs in use when no tasks running")
+			assert.Equal(t, multiGPUIdleUsage, *gm.MetricValueLong, "No GPUs in use when no tasks running")
 		}
 	}
 }
 
 // TestGPUMetrics_StaleData_NotReEmitted verifies that when dcgm-init stops
 // updating the file (crash/hang), the agent does not re-emit the same data.
-// The handler detects staleness by comparing timestamps — if unchanged, it
-// returns cached data (which the stats engine already published).
 func TestGPUMetrics_StaleData_NotReEmitted(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// Write data with a fixed timestamp (simulates dcgm-init stopped updating)
 	data := GPUMetricsFileData{
-		Timestamp: "2026-01-01T00:00:00Z",
+		Timestamp: integStaleTimestamp,
 		GPUs: []GPUMetric{
-			{GPUUUID: "GPU-stale", GPUUtilization: aws.Float64(99.0)},
+			{GPUUUID: "GPU-stale", GPUUtilization: aws.Float64(integStaleUtil)},
 		},
 		Healthy: true,
 	}
@@ -302,15 +331,10 @@ func TestGPUMetrics_StaleData_NotReEmitted(t *testing.T) {
 
 	handler := NewDCGMHandler(filePath)
 
-	// First read returns the metrics
 	metrics1 := handler.GetGPUMetrics()
 	require.NotNil(t, metrics1)
 
-	// Subsequent reads with unchanged file return the same cached pointer
-	// (timestamp didn't change, so no new data to emit)
 	metrics2 := handler.GetGPUMetrics()
 	assert.Equal(t, metrics1, metrics2,
 		"Same timestamp should return cached metrics — stale data is not re-processed")
-
-	// The stats engine uses the timestamp to avoid publishing duplicates to TACS
 }
