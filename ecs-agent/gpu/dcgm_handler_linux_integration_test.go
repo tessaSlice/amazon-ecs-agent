@@ -381,7 +381,8 @@ func TestGPUMetrics_MultiContainerMultiGPU(t *testing.T) {
 }
 
 // TestGPUMetrics_StaleData_NotReEmitted verifies that when dcgm-init stops
-// updating the file (crash/hang), the agent does not re-emit the same data.
+// updating the file (crash/hang), the handler returns nil so the stats engine
+// does not re-emit stale metrics to TACS.
 func TestGPUMetrics_StaleData_NotReEmitted(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
@@ -397,10 +398,19 @@ func TestGPUMetrics_StaleData_NotReEmitted(t *testing.T) {
 
 	handler := NewDCGMHandler(filePath)
 
+	// First read returns valid metrics
 	metrics1 := handler.GetGPUMetrics()
 	require.NotNil(t, metrics1)
+	require.Len(t, metrics1, 1)
 
+	// Second read returns nil (timestamp unchanged — stale data)
 	metrics2 := handler.GetGPUMetrics()
-	assert.Equal(t, metrics1, metrics2,
-		"Same timestamp should return cached metrics — stale data is not re-processed")
+	assert.Nil(t, metrics2, "Stale data should return nil to prevent TACS re-emission")
+
+	// Verify that nil metrics result in no TACS payload
+	containerPayload := GPUMetricsForContainer(metrics2, []string{"GPU-stale"})
+	assert.Nil(t, containerPayload, "Nil metrics should produce nil container payload")
+
+	instancePayload := GPUMetricsToInstancePayload(metrics2, 0)
+	assert.Nil(t, instancePayload, "Nil metrics should produce nil instance payload")
 }

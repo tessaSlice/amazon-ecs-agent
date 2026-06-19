@@ -43,7 +43,6 @@ type DCGMHandler struct {
 	filePath      string
 	mu            sync.RWMutex
 	lastTimestamp string
-	lastMetrics   []GPUMetric
 }
 
 // NewDCGMHandler creates a new handler for reading GPU metrics from the shared file.
@@ -77,16 +76,16 @@ func (h *DCGMHandler) GetGPUMetrics() []GPUMetric {
 		return nil
 	}
 
-	// Check if timestamp changed since last read (avoid emitting duplicate data).
+	// If the timestamp hasn't changed since our last read, return nil to signal
+	// "no new data" — the stats engine should not re-emit stale metrics to TACS.
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if fileData.Timestamp == h.lastTimestamp {
-		return h.lastMetrics
+		return nil
 	}
 
 	h.lastTimestamp = fileData.Timestamp
-	h.lastMetrics = fileData.GPUs
 	return fileData.GPUs
 }
 
