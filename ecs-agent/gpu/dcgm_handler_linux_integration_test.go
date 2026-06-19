@@ -113,12 +113,68 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 	require.Len(t, containerMetric.GeneralMetricsPayload, 1)
 
 	wrapper := containerMetric.GeneralMetricsPayload[0]
+	require.Len(t, wrapper.Dimensions, 1)
 	assert.Equal(t, integDimensionKey, *wrapper.Dimensions[0].Key)
 	assert.Equal(t, integGPUUUID, *wrapper.Dimensions[0].Value)
-	assert.Len(t, wrapper.GeneralMetrics, integMetricCount)
+	require.Len(t, wrapper.GeneralMetrics, integMetricCount)
+
+	// Assert every metric field in the container payload
+	metricDoubles := make(map[string]float64)
+	metricLongs := make(map[string]int64)
+	metricUnits := make(map[string]string)
+	for _, gm := range wrapper.GeneralMetrics {
+		require.NotNil(t, gm.MetricName)
+		require.NotNil(t, gm.Unit)
+		metricUnits[*gm.MetricName] = *gm.Unit
+		if gm.MetricValueDouble != nil {
+			metricDoubles[*gm.MetricName] = *gm.MetricValueDouble
+		}
+		if gm.MetricValueLong != nil {
+			metricLongs[*gm.MetricName] = *gm.MetricValueLong
+		}
+	}
+
+	assert.Equal(t, integUtilization, metricDoubles["GPUUtilization"])
+	assert.Equal(t, integMemUtil, metricDoubles["GPUMemoryUtilization"])
+	assert.Equal(t, int64(integMemTotal), metricLongs["GPUMemoryTotal"])
+	assert.Equal(t, int64(integMemUsed), metricLongs["GPUMemoryUsed"])
+	assert.Equal(t, integPowerDraw, metricDoubles["GPUPowerDraw"])
+	assert.Equal(t, integTemperature, metricDoubles["GPUTemperature"])
+	assert.Equal(t, integXidCount, metricLongs["GPURestartAppXidCount"])
+
+	assert.Equal(t, "Percent", metricUnits["GPUUtilization"])
+	assert.Equal(t, "Percent", metricUnits["GPUMemoryUtilization"])
+	assert.Equal(t, "Bytes", metricUnits["GPUMemoryTotal"])
+	assert.Equal(t, "Bytes", metricUnits["GPUMemoryUsed"])
+	assert.Equal(t, "None", metricUnits["GPUPowerDraw"])
+	assert.Equal(t, "None", metricUnits["GPUTemperature"])
+	assert.Equal(t, integUnitCount, metricUnits["GPURestartAppXidCount"])
 
 	// Build instance-level payload
 	instancePayload := GPUMetricsToInstancePayload(gpuMetrics, 1)
+	require.NotNil(t, instancePayload)
+	require.Len(t, instancePayload, 1)
+	require.Len(t, instancePayload[0].GeneralMetrics, 2)
+
+	var instLimit, instUsage int64
+	for _, gm := range instancePayload[0].GeneralMetrics {
+		require.NotNil(t, gm.MetricName)
+		require.NotNil(t, gm.MetricValueLong)
+		require.NotNil(t, gm.Unit)
+		switch *gm.MetricName {
+		case "InstanceGPULimit":
+			instLimit = *gm.MetricValueLong
+			assert.Equal(t, integUnitCount, *gm.Unit)
+		case "InstanceGPUUsageTotal":
+			instUsage = *gm.MetricValueLong
+			assert.Equal(t, integUnitCount, *gm.Unit)
+		default:
+			t.Errorf("Unexpected instance metric: %s", *gm.MetricName)
+		}
+	}
+	assert.Equal(t, int64(1), instLimit)
+	assert.Equal(t, int64(1), instUsage)
+
 	instanceMetrics := &ecstcs.InstanceMetrics{
 		GeneralMetricsPayload: instancePayload,
 	}
@@ -137,16 +193,26 @@ func TestGPUMetrics_PopulatesTACSPayload_WhenAvailable(t *testing.T) {
 	require.NotNil(t, telemetryMessage.InstanceMetrics)
 	require.Len(t, telemetryMessage.InstanceMetrics.GeneralMetricsPayload, 1)
 	require.Len(t, telemetryMessage.TaskMetrics, 1)
+	assert.Equal(t, integTaskArn, *telemetryMessage.TaskMetrics[0].TaskArn)
 	require.Len(t, telemetryMessage.TaskMetrics[0].ContainerMetrics, 1)
+	assert.Equal(t, integContainerName, *telemetryMessage.TaskMetrics[0].ContainerMetrics[0].ContainerName)
 	require.NotNil(t, telemetryMessage.TaskMetrics[0].ContainerMetrics[0].GeneralMetricsPayload)
 
 	// Verify JSON serialization works (what actually goes on the websocket)
 	jsonBytes, err := json.Marshal(telemetryMessage)
 	require.NoError(t, err)
 	assert.Contains(t, string(jsonBytes), "GPUUtilization")
+	assert.Contains(t, string(jsonBytes), "GPUMemoryUtilization")
+	assert.Contains(t, string(jsonBytes), "GPUMemoryTotal")
+	assert.Contains(t, string(jsonBytes), "GPUMemoryUsed")
+	assert.Contains(t, string(jsonBytes), "GPUPowerDraw")
 	assert.Contains(t, string(jsonBytes), "GPUTemperature")
+	assert.Contains(t, string(jsonBytes), "GPURestartAppXidCount")
 	assert.Contains(t, string(jsonBytes), "InstanceGPULimit")
+	assert.Contains(t, string(jsonBytes), "InstanceGPUUsageTotal")
 	assert.Contains(t, string(jsonBytes), integGPUUUID)
+	assert.Contains(t, string(jsonBytes), integTaskArn)
+	assert.Contains(t, string(jsonBytes), integContainerName)
 }
 
 // TestGPUMetrics_OmittedFromPayload_WhenNoGPUs verifies that the handler correctly
