@@ -19,11 +19,16 @@ import "github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 
 type GPUMetric struct{}
 
+type GPUMetricsResult struct {
+	Timestamp string
+	Metrics   []GPUMetric
+}
+
 type DCGMHandler struct{}
 
 func NewDCGMHandler(_ string) *DCGMHandler { return &DCGMHandler{} }
 
-func (h *DCGMHandler) GetGPUMetrics() []GPUMetric { return nil }
+func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult { return nil }
 
 func GPUMetricsToInstancePayload(_ []GPUMetric, _ int64) []*ecstcs.GeneralMetricsWrapper {
 	return nil

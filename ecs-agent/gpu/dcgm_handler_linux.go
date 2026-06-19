@@ -18,7 +18,6 @@ package gpu
 import (
 	"encoding/json"
 	"os"
-	"sync"
 	"time"
 
 	seelog "github.com/cihub/seelog"
@@ -35,12 +34,17 @@ type GPUMetricsFileData struct {
 	GPUs      []GPUMetric `json:"gpus"`
 }
 
+// GPUMetricsResult holds the parsed GPU metrics along with the timestamp
+// from dcgm-init. Callers use the timestamp to detect stale data.
+type GPUMetricsResult struct {
+	Timestamp string
+	Metrics   []GPUMetric
+}
+
 // DCGMHandler reads GPU metrics from the shared file written by dcgm-init
 // and provides them to the stats engine for TACS reporting.
 type DCGMHandler struct {
-	filePath      string
-	mu            sync.RWMutex
-	lastTimestamp string
+	filePath string
 }
 
 // NewDCGMHandler creates a new handler for reading GPU metrics from the shared file.
@@ -53,12 +57,10 @@ func NewDCGMHandler(filePath string) *DCGMHandler {
 	}
 }
 
-// GetGPUMetrics returns the latest GPU metrics read from the shared file.
-// Returns nil if the file is missing, stale, or unparseable.
-func (h *DCGMHandler) GetGPUMetrics() []GPUMetric {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
+// GetGPUMetrics reads and parses the GPU metrics file.
+// Returns nil if the file is missing, corrupt, or has an invalid timestamp.
+// The caller is responsible for staleness detection using the returned Timestamp.
+func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult {
 	data, err := os.ReadFile(h.filePath)
 	if err != nil {
 		seelog.Debugf("GPU metrics file not available: %v", err)
@@ -77,14 +79,10 @@ func (h *DCGMHandler) GetGPUMetrics() []GPUMetric {
 		return nil
 	}
 
-	// Only emit metrics if the timestamp is strictly newer than the last read.
-	// This prevents re-emitting stale data and guards against out-of-order reads.
-	if fileData.Timestamp <= h.lastTimestamp {
-		return nil
+	return &GPUMetricsResult{
+		Timestamp: fileData.Timestamp,
+		Metrics:   fileData.GPUs,
 	}
-
-	h.lastTimestamp = fileData.Timestamp
-	return fileData.GPUs
 }
 
 // GPUMetric holds per-device GPU telemetry. This struct is used by both

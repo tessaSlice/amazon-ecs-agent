@@ -121,6 +121,8 @@ type DockerStatsEngine struct {
 	dcgmHandler *gpu.DCGMHandler
 	// gpuMetricsPublishCount tracks ticks to emit GPU metrics every 60s (3 ticks at 20s).
 	gpuMetricsPublishCount int
+	// lastGPUTimestamp tracks the last timestamp emitted to TACS to prevent duplicate emissions.
+	lastGPUTimestamp string
 }
 
 // ResolveTask resolves the api task object, given container id.
@@ -496,10 +498,11 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 		engine.gpuMetricsPublishCount++
 		if engine.gpuMetricsPublishCount >= 3 {
 			engine.gpuMetricsPublishCount = 0
-			gpuMetrics := engine.dcgmHandler.GetGPUMetrics()
-			if len(gpuMetrics) > 0 {
+			gpuResult := engine.dcgmHandler.GetGPUMetrics()
+			if gpuResult != nil && len(gpuResult.Metrics) > 0 && gpuResult.Timestamp > engine.lastGPUTimestamp {
+				engine.lastGPUTimestamp = gpuResult.Timestamp
 				usageTotal := engine.computeGPUUsageTotal()
-				instancePayload := gpu.GPUMetricsToInstancePayload(gpuMetrics, usageTotal)
+				instancePayload := gpu.GPUMetricsToInstancePayload(gpuResult.Metrics, usageTotal)
 				if instancePayload != nil {
 					metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
 						GeneralMetricsPayload: instancePayload,
@@ -964,15 +967,18 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 			}
 		}
 		// Add GPU metrics for containers with assigned GPUs.
+		// Only emit on the same tick as instance-level (gpuMetricsPublishCount was just reset to 0).
 		if engine.gpuMetricsPublishCount == 0 {
 			if task, taskErr := engine.resolver.ResolveTask(dockerID); taskErr == nil {
 				if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
 					gpuIDs := dockerContainer.Container.GPUIDs
 					if len(gpuIDs) > 0 {
-						gpuMetrics := engine.dcgmHandler.GetGPUMetrics()
-						gpuPayload := gpu.GPUMetricsForContainer(gpuMetrics, gpuIDs)
-						if len(gpuPayload) > 0 {
-							containerMetric.GeneralMetricsPayload = gpuPayload
+						gpuResult := engine.dcgmHandler.GetGPUMetrics()
+						if gpuResult != nil && gpuResult.Timestamp == engine.lastGPUTimestamp {
+							gpuPayload := gpu.GPUMetricsForContainer(gpuResult.Metrics, gpuIDs)
+							if len(gpuPayload) > 0 {
+								containerMetric.GeneralMetricsPayload = gpuPayload
+							}
 						}
 						_ = task // suppress unused warning
 					}

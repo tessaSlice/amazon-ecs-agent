@@ -85,17 +85,18 @@ func TestDCGMHandlerValidFile(t *testing.T) {
 	writeMetricsFile(t, filePath, data)
 
 	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
+	result := handler.GetGPUMetrics()
 
-	require.Len(t, metrics, 1)
-	assert.Equal(t, testGPUUUID0, metrics[0].GPUUUID)
-	assert.Equal(t, testUtilization0, *metrics[0].GPUUtilization)
-	assert.Equal(t, testMemUtil0, *metrics[0].MemoryUtilization)
-	assert.Equal(t, testMemTotal0, *metrics[0].MemoryTotal)
-	assert.Equal(t, testMemUsed0, *metrics[0].MemoryUsed)
-	assert.Equal(t, testPowerDraw0, *metrics[0].PowerDraw)
-	assert.Equal(t, testTemp0, *metrics[0].Temperature)
-	assert.Equal(t, int64(0), metrics[0].RestartAppXidCount)
+	require.NotNil(t, result)
+	require.Len(t, result.Metrics, 1)
+	assert.Equal(t, testGPUUUID0, result.Metrics[0].GPUUUID)
+	assert.Equal(t, testUtilization0, *result.Metrics[0].GPUUtilization)
+	assert.Equal(t, testMemUtil0, *result.Metrics[0].MemoryUtilization)
+	assert.Equal(t, testMemTotal0, *result.Metrics[0].MemoryTotal)
+	assert.Equal(t, testMemUsed0, *result.Metrics[0].MemoryUsed)
+	assert.Equal(t, testPowerDraw0, *result.Metrics[0].PowerDraw)
+	assert.Equal(t, testTemp0, *result.Metrics[0].Temperature)
+	assert.Equal(t, int64(0), result.Metrics[0].RestartAppXidCount)
 }
 
 func TestDCGMHandlerMultipleGPUs(t *testing.T) {
@@ -153,12 +154,13 @@ func TestDCGMHandlerMultipleGPUs(t *testing.T) {
 	writeMetricsFile(t, filePath, data)
 
 	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
+	result := handler.GetGPUMetrics()
 
-	require.Len(t, metrics, len(expectedGPUs))
+	require.NotNil(t, result)
+	require.Len(t, result.Metrics, len(expectedGPUs))
 
 	for i, expected := range expectedGPUs {
-		actual := metrics[i]
+		actual := result.Metrics[i]
 		assert.Equal(t, expected.GPUUUID, actual.GPUUUID, "GPU %d UUID mismatch", i)
 		assert.Equal(t, *expected.GPUUtilization, *actual.GPUUtilization, "GPU %d utilization mismatch", i)
 		assert.Equal(t, *expected.MemoryUtilization, *actual.MemoryUtilization, "GPU %d memory utilization mismatch", i)
@@ -172,8 +174,8 @@ func TestDCGMHandlerMultipleGPUs(t *testing.T) {
 
 func TestDCGMHandlerFileNotFound(t *testing.T) {
 	handler := NewDCGMHandler("/nonexistent/path/gpu-metrics.json")
-	metrics := handler.GetGPUMetrics()
-	assert.Nil(t, metrics)
+	result := handler.GetGPUMetrics()
+	assert.Nil(t, result)
 }
 
 func TestDCGMHandlerInvalidJSON(t *testing.T) {
@@ -182,8 +184,8 @@ func TestDCGMHandlerInvalidJSON(t *testing.T) {
 	os.WriteFile(filePath, []byte("not valid json{{{"), 0644)
 
 	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
-	assert.Nil(t, metrics)
+	result := handler.GetGPUMetrics()
+	assert.Nil(t, result)
 }
 
 func TestDCGMHandlerEmptyFile(t *testing.T) {
@@ -192,8 +194,8 @@ func TestDCGMHandlerEmptyFile(t *testing.T) {
 	os.WriteFile(filePath, []byte(""), 0644)
 
 	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
-	assert.Nil(t, metrics, "Empty file should return nil (JSON parsing fails gracefully)")
+	result := handler.GetGPUMetrics()
+	assert.Nil(t, result, "Empty file should return nil (JSON parsing fails gracefully)")
 }
 
 // TestDCGMHandler_GetGPUMetrics_FractionalGPU_MissingFieldsInJSON verifies that
@@ -224,27 +226,27 @@ func TestDCGMHandlerFractionalGPUMissingFields(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := NewDCGMHandler(filePath)
-	metrics := handler.GetGPUMetrics()
+	result := handler.GetGPUMetrics()
 
-	require.Len(t, metrics, 1)
-	assert.Equal(t, testGPUUUIDFractional, metrics[0].GPUUUID)
-	assert.NotNil(t, metrics[0].GPUUtilization)
-	assert.Equal(t, testFractionalUtil, *metrics[0].GPUUtilization)
-	assert.NotNil(t, metrics[0].MemoryUtilization)
-	assert.Equal(t, testFractionalMemUtil, *metrics[0].MemoryUtilization)
-	assert.NotNil(t, metrics[0].MemoryTotal)
-	assert.Equal(t, testFractionalMem, *metrics[0].MemoryTotal)
-	assert.Nil(t, metrics[0].PowerDraw,
+	require.NotNil(t, result)
+	require.Len(t, result.Metrics, 1)
+	assert.Equal(t, testGPUUUIDFractional, result.Metrics[0].GPUUUID)
+	assert.NotNil(t, result.Metrics[0].GPUUtilization)
+	assert.Equal(t, testFractionalUtil, *result.Metrics[0].GPUUtilization)
+	assert.NotNil(t, result.Metrics[0].MemoryUtilization)
+	assert.Equal(t, testFractionalMemUtil, *result.Metrics[0].MemoryUtilization)
+	assert.NotNil(t, result.Metrics[0].MemoryTotal)
+	assert.Equal(t, testFractionalMem, *result.Metrics[0].MemoryTotal)
+	assert.Nil(t, result.Metrics[0].PowerDraw,
 		"PowerDraw should be nil when field is absent from JSON (not zero)")
-	assert.Nil(t, metrics[0].Temperature,
+	assert.Nil(t, result.Metrics[0].Temperature,
 		"Temperature should be nil when field is absent from JSON (not zero)")
-	assert.Equal(t, int64(0), metrics[0].RestartAppXidCount)
+	assert.Equal(t, int64(0), result.Metrics[0].RestartAppXidCount)
 }
 
-// TestDCGMHandler_GetGPUMetrics_ReturnsNilOnUnchangedTimestamp verifies that
-// when dcgm-init hasn't written new data (file timestamp unchanged), the handler
-// returns nil so the stats engine does not re-emit stale metrics to TACS.
-func TestDCGMHandlerReturnsNilOnUnchangedTimestamp(t *testing.T) {
+// TestDCGMHandlerReturnsTimestamp verifies that the handler returns the timestamp
+// from the file so callers can detect stale data.
+func TestDCGMHandlerReturnsTimestamp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
@@ -258,19 +260,17 @@ func TestDCGMHandlerReturnsNilOnUnchangedTimestamp(t *testing.T) {
 
 	handler := NewDCGMHandler(filePath)
 
-	// First call returns metrics (new timestamp)
-	metrics1 := handler.GetGPUMetrics()
-	require.NotNil(t, metrics1, "First read should return metrics")
-	require.Len(t, metrics1, 1)
-	assert.Equal(t, testGPUUUID0, metrics1[0].GPUUUID)
+	// Handler always returns data with the timestamp — no staleness logic
+	result1 := handler.GetGPUMetrics()
+	require.NotNil(t, result1)
+	assert.Equal(t, testStaleTimestamp, result1.Timestamp)
+	require.Len(t, result1.Metrics, 1)
 
-	// Second call with unchanged file returns nil (stale — don't re-emit)
-	metrics2 := handler.GetGPUMetrics()
-	assert.Nil(t, metrics2, "Second read with same timestamp should return nil to prevent re-emission")
-
-	// Third call still nil (file hasn't changed)
-	metrics3 := handler.GetGPUMetrics()
-	assert.Nil(t, metrics3, "Subsequent reads should continue returning nil until timestamp changes")
+	// Second call returns the same data (handler doesn't track staleness)
+	result2 := handler.GetGPUMetrics()
+	require.NotNil(t, result2)
+	assert.Equal(t, result1.Timestamp, result2.Timestamp)
+	assert.Equal(t, result1.Metrics[0].GPUUUID, result2.Metrics[0].GPUUUID)
 }
 
 func TestDCGMHandlerDefaultFilePath(t *testing.T) {
