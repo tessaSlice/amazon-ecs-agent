@@ -17,6 +17,7 @@ package gpu
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,7 +30,8 @@ import (
 
 // Test constants to avoid hardcoding values throughout.
 const (
-	testGPUUUID0 = "GPU-abc-123"
+	testGPUUUID0          = "GPU-abc-123"
+	testGPUUUIDFractional = "GPU-fractional-raw"
 	testGPUUUID1 = "GPU-0"
 	testGPUUUID2 = "GPU-1"
 	testGPUUUID3 = "GPU-2"
@@ -242,20 +244,21 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_MissingFieldsInJSON(t *testing.
 
 	// Write raw JSON exactly as dcgm-init would on a g6f instance —
 	// power_draw_watts and temperature_celsius are completely absent (not null).
-	rawJSON := `{
-  "timestamp": "` + time.Now().UTC().Format(time.RFC3339) + `",
+	rawJSON := fmt.Sprintf(`{
+  "timestamp": "%s",
   "gpus": [
     {
-      "gpu_uuid": "GPU-fractional-raw",
-      "gpu_utilization_percent": 0,
-      "memory_utilization_percent": 7.5,
-      "memory_total_bytes": 6442450944,
+      "gpu_uuid": "%s",
+      "gpu_utilization_percent": %v,
+      "memory_utilization_percent": %v,
+      "memory_total_bytes": %d,
       "memory_used_bytes": 0,
       "restart_app_xid_count": 0
     }
   ],
   "healthy": true
-}`
+}`, time.Now().UTC().Format(time.RFC3339), testGPUUUIDFractional, testFractionalUtil, testFractionalMemUtil, testFractionalMem)
+
 	err := os.WriteFile(filePath, []byte(rawJSON), 0644)
 	require.NoError(t, err)
 
@@ -263,9 +266,9 @@ func TestDCGMHandler_GetGPUMetrics_FractionalGPU_MissingFieldsInJSON(t *testing.
 	metrics := handler.GetGPUMetrics()
 
 	require.Len(t, metrics, 1)
-	assert.Equal(t, "GPU-fractional-raw", metrics[0].GPUUUID)
+	assert.Equal(t, testGPUUUIDFractional, metrics[0].GPUUUID)
 	assert.NotNil(t, metrics[0].GPUUtilization)
-	assert.Equal(t, 0.0, *metrics[0].GPUUtilization)
+	assert.Equal(t, testFractionalUtil, *metrics[0].GPUUtilization)
 	assert.NotNil(t, metrics[0].MemoryUtilization)
 	assert.Equal(t, testFractionalMemUtil, *metrics[0].MemoryUtilization)
 	assert.NotNil(t, metrics[0].MemoryTotal)
