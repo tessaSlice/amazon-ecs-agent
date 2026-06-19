@@ -32,10 +32,10 @@ import (
 const (
 	testGPUUUID0          = "GPU-abc-123"
 	testGPUUUIDFractional = "GPU-fractional-raw"
-	testGPUUUID1 = "GPU-0"
-	testGPUUUID2 = "GPU-1"
-	testGPUUUID3 = "GPU-2"
-	testGPUUUID4 = "GPU-3"
+	testGPUUUID1          = "GPU-0"
+	testGPUUUID2          = "GPU-1"
+	testGPUUUID3          = "GPU-2"
+	testGPUUUID4          = "GPU-3"
 
 	testUtilization0 = 85.0
 	testUtilization1 = 100.0
