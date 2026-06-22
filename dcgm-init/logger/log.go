@@ -16,8 +16,10 @@ package logger
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cihub/seelog"
 )
@@ -26,8 +28,11 @@ const (
 	LOGLEVEL_ENV_VAR = "DCGM_INIT_LOGLEVEL"
 	defaultLogLevel  = "info"
 	outputFmt        = "logfmt"
+	rollCount        = 24
+	logFile          = "/var/log/ecs/dcgm-init.log"
 )
 
+// logLevels is the mapping from DCGM_INIT_LOGLEVEL to Seelog provided levels.
 var logLevels = map[string]string{
 	"debug": "debug",
 	"info":  "info",
@@ -40,21 +45,27 @@ var logLevels = map[string]string{
 type logConfig struct {
 	level        string
 	outputFormat string
+	maxRollCount int
 	lock         sync.Mutex
 }
 
+// config contains config for seelog logger
 var config *logConfig
 
 func init() {
 	config = &logConfig{
 		level:        defaultLogLevel,
 		outputFormat: outputFmt,
+		maxRollCount: rollCount,
 	}
 }
 
+// Setup sets the custom logging config
 func Setup() {
-	if err := seelog.RegisterCustomFormatter("DcgmInitLogfmt", logfmtFormatter); err != nil {
-		fmt.Printf("Failed to register DcgmInitLogfmt formatter: %v\n", err)
+	// Register the custom formatter first, before any logging configuration is loaded
+	if err := seelog.RegisterCustomFormatter("InitLogfmt", logfmtFormatter); err != nil {
+		// Use fmt.Printf for error logging since seelog might not be configured yet
+		fmt.Printf("Failed to register InitLogfmt formatter: %v\n", err)
 	}
 
 	if logLevel := os.Getenv(LOGLEVEL_ENV_VAR); logLevel != "" {
@@ -65,8 +76,8 @@ func Setup() {
 
 func logfmtFormatter(params string) seelog.FormatterFunc {
 	return func(message string, level seelog.LogLevel, context seelog.LogContextInterface) interface{} {
-		return fmt.Sprintf("level=%s time=%s msg=%q\n",
-			level.String(), context.CallTime().UTC().Format("2006-01-02T15:04:05Z"), message)
+		return fmt.Sprintf(`level=%s time=%s msg=%q
+`, level.String(), context.CallTime().UTC().Format(time.RFC3339), message)
 	}
 }
 
@@ -92,13 +103,20 @@ func reloadConfig() {
 }
 
 func seelogConfig() string {
-	return `
+	c := `
 <seelog type="asyncloop" minlevel="` + config.level + `">
 	<outputs formatid="` + config.outputFormat + `">
-		<console />
+		<console />`
+	if logFile != "" {
+		c += `
+		<rollingfile filename="` + logFile + `" type="date"
+		 datepattern="2006-01-02-15" archivetype="none" maxrolls="` + strconv.Itoa(config.maxRollCount) + `" />`
+	}
+	c += `
 	</outputs>
 	<formats>
-		<format id="logfmt" format="%DcgmInitLogfmt" />
+		<format id="logfmt" format="%InitLogfmt" />
 	</formats>
 </seelog>`
+	return c
 }
