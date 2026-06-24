@@ -258,8 +258,7 @@ type dcgmClient struct {
 	// deviceIndexToUUID maps GPU device index to UUID. Populated during GetMetrics.
 	deviceIndexToUUID map[uint]string
 
-	// Mutex for thread-safe access to state. While we don't often use mutexes in Two having this
-	// component not be an actor keeps the door open to reusing this component in the ECS/EC2 agent.
+	// Mutex for thread-safe access to state.
 	mu sync.RWMutex
 
 	// Number of pending dcgm.Init attempts to prevent goroutine leaks.
