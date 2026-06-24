@@ -24,12 +24,12 @@ import (
 	"time"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
-	ecsgpu "github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	log "github.com/cihub/seelog"
 )
 
 // GPUMetric is the shared type from ecs-agent/gpu used by both dcgm-init and the agent.
-type GPUMetric = ecsgpu.GPUMetric
+type GPUMetric = types.GPUMetric
 
 const (
 	// DefaultSocketPath is the default Unix domain socket path for the DCGM nv-hostengine.

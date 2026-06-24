@@ -15,9 +15,12 @@
 
 package gpu
 
-import "github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
+import (
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
+)
 
-type GPUMetric struct{}
+type GPUMetric = types.GPUMetric
 
 type GPUMetricsResult struct {
 	Timestamp string

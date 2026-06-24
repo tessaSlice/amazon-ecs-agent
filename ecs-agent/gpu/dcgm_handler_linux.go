@@ -20,8 +20,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	seelog "github.com/cihub/seelog"
 )
+
+// GPUMetric is the shared type from ecs-agent/gpu/types.
+type GPUMetric = types.GPUMetric
 
 const (
 	// DefaultGPUMetricsFilePath is the shared file where dcgm-init writes GPU metrics.
