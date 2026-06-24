@@ -6,9 +6,12 @@ toolchain go1.25.9
 
 require (
 	github.com/NVIDIA/go-dcgm v0.0.0-20251203192032-7ac2f778d507
+	github.com/aws/amazon-ecs-agent/ecs-agent v0.0.0
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.0
 )
+
+replace github.com/aws/amazon-ecs-agent/ecs-agent => ../ecs-agent
 
 require (
 	github.com/bits-and-blooms/bitset v1.22.0 // indirect

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"go.uber.org/zap"
 )
 
@@ -144,42 +145,8 @@ var restartAppXIDCodes = map[uint64]bool{
 	131: true, 132: true, 133: true, 134: true, 135: true, 139: true,
 }
 
-// GPUMetric holds per-device GPU telemetry collected from DCGM.
-// All fields use pointers so that a nil value indicates the metric was unavailable
-// (e.g. metrics on older GPUs that don't support certain fields).
-type GPUMetric struct {
-	// GPUUUID is the unique identifier for the GPU device (e.g. "GPU-91b959f7-0011-6abd-bfcb-6cb736c60e84").
-	// Used for container-to-GPU mapping in the metrics pipeline.
-	GPUUUID string
-
-	// GPUUtilization is the GPU compute utilization percentage (0-100).
-	// DCGM field: DCGM_FI_DEV_GPU_UTIL.
-	GPUUtilization *float64
-
-	// MemoryUtilization is the GPU memory utilization percentage (0-100).
-	// DCGM field: DCGM_FI_DEV_FB_USED_PERCENT (framebuffer used ratio 0.0-1.0, scaled ×100).
-	MemoryUtilization *float64
-
-	// MemoryTotal is the total GPU framebuffer memory in bytes.
-	// DCGM field: DCGM_FI_DEV_FB_TOTAL. Converted from MiB to bytes.
-	MemoryTotal *uint64
-
-	// MemoryUsed is the used GPU framebuffer memory in bytes.
-	// DCGM field: DCGM_FI_DEV_FB_USED. Converted from MiB to bytes.
-	MemoryUsed *uint64
-
-	// PowerDraw is the current GPU power consumption in watts.
-	// DCGM field: DCGM_FI_DEV_POWER_USAGE.
-	PowerDraw *float64
-
-	// Temperature is the current GPU temperature in degrees Celsius.
-	// DCGM field: DCGM_FI_DEV_GPU_TEMP.
-	Temperature *float64
-
-	// RestartAppXidCount is the number of RESTART_APP XID errors since the last collection tick.
-	// Populated from DCGM_FI_DEV_XID_ERRORS via GetValuesSince.
-	RestartAppXidCount int64
-}
+// GPUMetric is an alias for the shared type used across modules.
+type GPUMetric = types.GPUMetric
 
 // Client provides an interface for monitoring Nvidia GPU health through the
 // Nvidia vended Data Center GPU Monitor (DCGM).
