@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
-	seelog "github.com/cihub/seelog"
+	log "github.com/cihub/seelog"
 )
 
 const (
@@ -324,19 +324,19 @@ func (c *dcgmClient) Reconcile(ctx context.Context) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	seelog.Infof("Reconciling DCGM connection, connected=%t, hasViolation=%t", c.connected, c.hasViolation)
+	log.Infof("Reconciling DCGM connection, connected=%t, hasViolation=%t", c.connected, c.hasViolation)
 
 	// If connected, perform health check via introspection.
 	if c.connected {
 		_, introspectErr := dcgm.Introspect()
 		if introspectErr == nil {
-			seelog.Info("DCGM connection healthy, no reconnection needed")
+			log.Info("DCGM connection healthy, no reconnection needed")
 			return false, nil
 		}
-		seelog.Warnf("DCGM health check failed, will attempt reconnection: %v", introspectErr)
+		log.Warnf("DCGM health check failed, will attempt reconnection: %v", introspectErr)
 		c.connected = false // Mark connection as lost.
 	} else {
-		seelog.Info("DCGM not connected, will attempt to connect")
+		log.Info("DCGM not connected, will attempt to connect")
 	}
 
 	// Shutdown existing connection before reinitializing.
@@ -349,35 +349,35 @@ func (c *dcgmClient) Reconcile(ctx context.Context) (bool, error) {
 		// Check if we're within grace period after shutdown.
 		timeSinceShutdown := time.Since(c.lastShutdown)
 		if time.Now().Before(c.lastShutdown.Add(c.initializationGracePeriod)) {
-			seelog.Infof("Initialization failed within grace period, suppressing error: gracePeriod=%v, timeSinceShutdown=%v, err=%v",
+			log.Infof("Initialization failed within grace period, suppressing error: gracePeriod=%v, timeSinceShutdown=%v, err=%v",
 				c.initializationGracePeriod, timeSinceShutdown, err)
 			return false, nil
 		}
-		seelog.Errorf("Initialization failed outside grace period: timeSinceShutdown=%v, err=%v",
+		log.Errorf("Initialization failed outside grace period: timeSinceShutdown=%v, err=%v",
 			timeSinceShutdown, err)
 		return false, fmt.Errorf("failed to initialize DCGM: %w", err)
 	}
 
-	seelog.Info("DCGM reinitialized successfully")
+	log.Info("DCGM reinitialized successfully")
 	return true, nil
 }
 
 // initializeLocked connects to DCGM and sets up monitoring.
 // Caller must hold c.mu lock.
 func (c *dcgmClient) initializeLocked(ctx context.Context) error {
-	seelog.Infof("Initializing DCGM client, socketPath=%s", c.socketPath)
+	log.Infof("Initializing DCGM client, socketPath=%s", c.socketPath)
 
 	// Check if there's already a pending initialization attempt to prevent unbounded go routine creation.
 	// We use CompareAndSwap to atomically check and increment, ensuring only one goroutine proceeds.
 	if !c.pendingInitAttempts.CompareAndSwap(0, 1) {
-		seelog.Warnf("Initialization already in progress, skipping new attempt: pendingAttempts=%d",
+		log.Warnf("Initialization already in progress, skipping new attempt: pendingAttempts=%d",
 			c.pendingInitAttempts.Load())
 		return fmt.Errorf("DCGM initialization already in progress")
 	}
 
 	// Initialize DCGM in standalone mode to connect to nv-hostengine.
 	// Use a timeout to prevent blocking indefinitely when host engine is unavailable.
-	seelog.Debugf("Connecting to host engine, socketPath=%s", c.socketPath)
+	log.Debugf("Connecting to host engine, socketPath=%s", c.socketPath)
 
 	// dcgm.Init() is a blocking call that connects to nv-hostengine via Unix domain socket.
 	// The underlying NVIDIA DCGM C library does not support context cancellation or
@@ -420,16 +420,16 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	case result = <-resultChan:
 		// Initialization completed.
 		if result.err != nil {
-			seelog.Errorf("Failed to connect to host engine: socketPath=%s, err=%v", c.socketPath, result.err)
+			log.Errorf("Failed to connect to host engine: socketPath=%s, err=%v", c.socketPath, result.err)
 			return result.err
 		}
 	case <-timeoutCtx.Done():
-		seelog.Errorf("Timeout connecting to host engine: socketPath=%s, timeout=%v", c.socketPath, initTimeout)
+		log.Errorf("Timeout connecting to host engine: socketPath=%s, timeout=%v", c.socketPath, initTimeout)
 		return fmt.Errorf("timeout connecting to nv-hostengine after %v", initTimeout)
 	}
 
 	c.cleanupFunc = result.cleanup
-	seelog.Info("Successfully connected to host engine")
+	log.Info("Successfully connected to host engine")
 
 	// Create context for policy violation listener.
 	policyCtx, cancel := context.WithCancel(ctx)
@@ -439,7 +439,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 
 	// Register policy violation listeners for all required policies.
 	// These policies monitor critical GPU health indicators that signal hardware degradation or failure.
-	seelog.Info("Registering policy violation listeners")
+	log.Info("Registering policy violation listeners")
 	policyChan, err := dcgm.ListenForPolicyViolations(policyCtx,
 		// XidPolicy: GPU hardware exceptions (XID errors).
 		// Example: XID 48 indicates a double-bit ECC error, XID 79 means
@@ -447,7 +447,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 		dcgm.XidPolicy,
 	)
 	if err != nil {
-		seelog.Errorf("Failed to register policy listeners: %v", err)
+		log.Errorf("Failed to register policy listeners: %v", err)
 		c.shutdownHandlers = nil
 		cancel()
 		if c.cleanupFunc != nil {
@@ -455,16 +455,16 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 		}
 		return err
 	}
-	seelog.Info("Successfully registered policy violation listeners")
+	log.Info("Successfully registered policy violation listeners")
 
 	c.policyViolationChan = policyChan
 
 	// Enable all DCGM health check systems. We consider the instance to be unhealthy even if a GPU
 	// that is not in use is impaired. This prevents a situation where a task is launched and given
 	// an impaired GPU.
-	seelog.Info("Enabling health check systems for all GPUs")
+	log.Info("Enabling health check systems for all GPUs")
 	if err := dcgm.HealthSet(dcgm.GroupAllGPUs(), dcgm.DCGM_HEALTH_WATCH_ALL); err != nil {
-		seelog.Errorf("Failed to enable health check systems: %v", err)
+		log.Errorf("Failed to enable health check systems: %v", err)
 		c.shutdownHandlers = nil
 		cancel()
 		if c.cleanupFunc != nil {
@@ -472,7 +472,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 		}
 		return err
 	}
-	seelog.Info("Successfully enabled health check systems")
+	log.Info("Successfully enabled health check systems")
 
 	// Start goroutine to listen for policy violations.
 	go c.listenForPolicyViolations()
@@ -491,7 +491,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	// Set up persistent XID error field watch for per-GPU XID counting.
 	c.setupXidWatch()
 
-	seelog.Infof("DCGM client initialized successfully: socketPath=%s, metricsWatchActive=%t, xidWatchActive=%t",
+	log.Infof("DCGM client initialized successfully: socketPath=%s, metricsWatchActive=%t, xidWatchActive=%t",
 		c.socketPath, c.metricsWatchActive, c.xidWatchActive)
 
 	return nil
@@ -499,17 +499,17 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 
 // listenForPolicyViolations monitors the policy violation channel and sets hasViolation flag.
 func (c *dcgmClient) listenForPolicyViolations() {
-	seelog.Info("Policy violation listener started")
+	log.Info("Policy violation listener started")
 	for {
 		select {
 		case <-c.ctx.Done():
 			// Context cancelled, exit goroutine.
-			seelog.Info("Policy violation listener stopped")
+			log.Info("Policy violation listener stopped")
 			return
 		case violation, ok := <-c.policyViolationChan:
 			if !ok {
 				// Channel closed, exit goroutine.
-				seelog.Info("Policy violation channel closed")
+				log.Info("Policy violation channel closed")
 				return
 			}
 
@@ -536,11 +536,11 @@ func (c *dcgmClient) IsHealthy() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	seelog.Debugf("Checking GPU health status: connected=%t, hasViolation=%t", c.connected, c.hasViolation)
+	log.Debugf("Checking GPU health status: connected=%t, hasViolation=%t", c.connected, c.hasViolation)
 
 	// Return false if any policy violation has occurred.
 	if c.hasViolation {
-		seelog.Warn("Policy violation detected, reporting unhealthy")
+		log.Warn("Policy violation detected, reporting unhealthy")
 		return false
 	}
 
@@ -560,19 +560,19 @@ func (c *dcgmClient) IsHealthy() bool {
 	// WARN results indicate non-critical issues that don't require instance draining.
 	response, err := dcgm.HealthCheck(dcgm.GroupAllGPUs())
 	if err != nil {
-		seelog.Errorf("Health check failed: %v", err)
+		log.Errorf("Health check failed: %v", err)
 		// Health check failure is a connection/communication issue, not hardware failure.
 		// The caller should check IsConnectionLost() to handle this properly.
 		return true
 	}
 
 	if response.OverallHealth == dcgm.DCGM_HEALTH_RESULT_FAIL {
-		seelog.Warnf("Health check returned FAIL status: overallHealth=%d", uint(response.OverallHealth))
+		log.Warnf("Health check returned FAIL status: overallHealth=%d", uint(response.OverallHealth))
 		return false
 	}
 
 	if response.OverallHealth == dcgm.DCGM_HEALTH_RESULT_WARN {
-		seelog.Warnf("Health check returned WARN status (non-critical): overallHealth=%d", uint(response.OverallHealth))
+		log.Warnf("Health check returned WARN status (non-critical): overallHealth=%d", uint(response.OverallHealth))
 	}
 
 	return true
@@ -613,7 +613,7 @@ func (c *dcgmClient) UnhealthyReason() string {
 func (c *dcgmClient) collectXidCounts(sinceTime time.Time, deviceToUUID map[uint]string) map[string]int64 {
 	entries, nextSinceTimestamp, err := dcgm.GetValuesSince(dcgm.GroupAllGPUs(), c.xidFieldGroup, sinceTime)
 	if err != nil {
-		seelog.Errorf("Failed to get XID values since last query, returning empty counts: %v", err)
+		log.Errorf("Failed to get XID values since last query, returning empty counts: %v", err)
 		return make(map[string]int64)
 	}
 
@@ -640,11 +640,11 @@ func (c *dcgmClient) Shutdown() error {
 func (c *dcgmClient) shutdownLocked() error {
 	// If not connected, nothing to clean up.
 	if !c.connected {
-		seelog.Debug("DCGM client not connected, nothing to shutdown")
+		log.Debug("DCGM client not connected, nothing to shutdown")
 		return nil
 	}
 
-	seelog.Info("Shutting down DCGM client")
+	log.Info("Shutting down DCGM client")
 
 	// Call all shutdown handlers (e.g., cancel functions).
 	for _, handler := range c.shutdownHandlers {
@@ -656,7 +656,7 @@ func (c *dcgmClient) shutdownLocked() error {
 	if c.cleanupFunc != nil {
 		c.cleanupFunc()
 		c.cleanupFunc = nil
-		seelog.Debug("DCGM cleanup function called successfully")
+		log.Debug("DCGM cleanup function called successfully")
 	}
 
 	// Reset state.
@@ -666,7 +666,7 @@ func (c *dcgmClient) shutdownLocked() error {
 	c.lastXidQueryTime = time.Time{}
 	c.deviceIndexToUUID = nil
 	c.lastShutdown = time.Now()
-	seelog.Info("DCGM client shutdown successfully")
+	log.Info("DCGM client shutdown successfully")
 
 	return nil
 }
@@ -689,11 +689,11 @@ func (c *dcgmClient) GetMetrics(ctx context.Context) ([]GPUMetric, error) {
 	// Get list of supported GPU devices.
 	gpus, err := dcgm.GetSupportedDevices()
 	if err != nil {
-		seelog.Errorf("Failed to get supported devices: %v", err)
+		log.Errorf("Failed to get supported devices: %v", err)
 		return nil, fmt.Errorf("failed to get supported devices: %w", err)
 	}
 
-	seelog.Debugf("Collecting metrics for GPU devices: deviceCount=%d", len(gpus))
+	log.Debugf("Collecting metrics for GPU devices: deviceCount=%d", len(gpus))
 
 	metrics := make([]GPUMetric, len(gpus))
 	for i, gpu := range gpus {
@@ -701,18 +701,18 @@ func (c *dcgmClient) GetMetrics(ctx context.Context) ([]GPUMetric, error) {
 		if metricsWatchActive {
 			values, err := dcgm.GetLatestValuesForFields(gpu, metricsFieldIDs())
 			if err != nil {
-				seelog.Warnf("Failed to get latest field values, skipping device: deviceIndex=%d, err=%v", gpu, err)
+				log.Warnf("Failed to get latest field values, skipping device: deviceIndex=%d, err=%v", gpu, err)
 				continue
 			}
 
 			if skipped := extractMetricsFromFieldValues(&metrics[i], values); len(skipped) > 0 {
-				seelog.Debugf("Sentinel values detected for metric fields: deviceIndex=%d, gpuUUID=%s, skippedFields=%v",
+				log.Debugf("Sentinel values detected for metric fields: deviceIndex=%d, gpuUUID=%s, skippedFields=%v",
 					gpu, metrics[i].GPUUUID, skipped)
 			}
 		}
 	}
 
-	seelog.Debugf("Collected GPU metrics: deviceCount=%d, metricsWatchActive=%t", len(metrics), metricsWatchActive)
+	log.Debugf("Collected GPU metrics: deviceCount=%d, metricsWatchActive=%t", len(metrics), metricsWatchActive)
 
 	// Build device index to UUID mapping and collect per-GPU XID counts.
 	deviceToUUID := make(map[uint]string, len(gpus))
@@ -805,45 +805,45 @@ func extractMetricsFromFieldValues(metric *GPUMetric, values []dcgm.FieldValue_v
 // On each collection tick, GetMetrics() reads values via GetLatestValuesForFields()
 // without creating or destroying any groups.
 func (c *dcgmClient) setupMetricsWatches() {
-	seelog.Info("Setting up persistent metrics field watches")
+	log.Info("Setting up persistent metrics field watches")
 
 	fieldGroup, err := dcgm.FieldGroupCreate("gpu_metrics_basic", metricsFieldIDs())
 	if err != nil {
-		seelog.Errorf("Failed to create metrics field group: %v", err)
+		log.Errorf("Failed to create metrics field group: %v", err)
 		return
 	}
 
 	err = dcgm.WatchFieldsWithGroup(fieldGroup, dcgm.GroupAllGPUs())
 	if err != nil {
-		seelog.Errorf("Failed to watch metrics fields: %v", err)
+		log.Errorf("Failed to watch metrics fields: %v", err)
 		if destroyErr := dcgm.FieldGroupDestroy(fieldGroup); destroyErr != nil {
-			seelog.Debugf("Failed to destroy unused metrics field group: %v", destroyErr)
+			log.Debugf("Failed to destroy unused metrics field group: %v", destroyErr)
 		}
 		return
 	}
 
 	c.metricsFieldGroup = fieldGroup
 	c.metricsWatchActive = true
-	seelog.Infof("Persistent metrics field watches enabled successfully: fieldCount=%d", len(metricsFields))
+	log.Infof("Persistent metrics field watches enabled successfully: fieldCount=%d", len(metricsFields))
 }
 
 // setupXidWatch creates a persistent field group for DCGM_FI_DEV_XID_ERRORS and
 // watches it on all GPUs. Called once during initialization, after setupMetricsWatches.
 // If setup fails, xidWatchActive remains false and XID counts default to zero.
 func (c *dcgmClient) setupXidWatch() {
-	seelog.Info("Setting up XID error field watch")
+	log.Info("Setting up XID error field watch")
 
 	fieldGroup, err := dcgm.FieldGroupCreate("gpu_xid_errors", []dcgm.Short{dcgm.DCGM_FI_DEV_XID_ERRORS})
 	if err != nil {
-		seelog.Errorf("Failed to create XID field group, XID counting disabled: %v", err)
+		log.Errorf("Failed to create XID field group, XID counting disabled: %v", err)
 		return
 	}
 
 	err = dcgm.WatchFieldsWithGroup(fieldGroup, dcgm.GroupAllGPUs())
 	if err != nil {
-		seelog.Errorf("Failed to watch XID fields, XID counting disabled: %v", err)
+		log.Errorf("Failed to watch XID fields, XID counting disabled: %v", err)
 		if destroyErr := dcgm.FieldGroupDestroy(fieldGroup); destroyErr != nil {
-			seelog.Debugf("Failed to destroy unused XID field group: %v", destroyErr)
+			log.Debugf("Failed to destroy unused XID field group: %v", destroyErr)
 		}
 		return
 	}
@@ -851,7 +851,7 @@ func (c *dcgmClient) setupXidWatch() {
 	c.xidFieldGroup = fieldGroup
 	c.xidWatchActive = true
 	c.lastXidQueryTime = time.Now()
-	seelog.Info("XID error field watch enabled successfully")
+	log.Info("XID error field watch enabled successfully")
 }
 
 // countRestartAppXidsByDevice takes a slice of FieldValue_v2 entries (from GetValuesSince)
@@ -981,16 +981,16 @@ func (c *dcgmClient) logPolicyViolation(violation dcgm.PolicyViolation) {
 			isCritical := wellKnownXIDCodes[xidCode]
 
 			if isCritical {
-				seelog.Errorf("XID policy violation (critical): condition=%s, timestamp=%v, xidCode=%d, critical=%t, xidMessage=%s",
+				log.Errorf("XID policy violation (critical): condition=%s, timestamp=%v, xidCode=%d, critical=%t, xidMessage=%s",
 					string(violation.Condition), violation.Timestamp, xidCode, isCritical, getXIDMessage(xidCode))
 			} else {
-				seelog.Warnf("XID policy violation (non-critical): condition=%s, timestamp=%v, xidCode=%d, critical=%t, xidMessage=%s",
+				log.Warnf("XID policy violation (non-critical): condition=%s, timestamp=%v, xidCode=%d, critical=%t, xidMessage=%s",
 					string(violation.Condition), violation.Timestamp, xidCode, isCritical, getXIDMessage(xidCode))
 			}
 		}
 
 	default:
-		seelog.Infof("Untracked policy violation: condition=%s, timestamp=%v",
+		log.Infof("Untracked policy violation: condition=%s, timestamp=%v",
 			string(violation.Condition), violation.Timestamp)
 	}
 }
