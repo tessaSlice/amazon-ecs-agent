@@ -13,14 +13,12 @@
 // express or implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-package dcgmclient
+package gpu
 
 import (
 	"context"
 	"fmt"
 	"sync"
-
-	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 )
 
 // MockClient is a mock implementation of Client for testing.
@@ -37,7 +35,7 @@ type MockClient struct {
 	reconcileJustInit bool
 
 	// Mock metrics state.
-	metrics         []gputypes.GPUMetric
+	metrics         []GPUMetric
 	metricsError    error
 	getMetricsCalls int
 
@@ -159,7 +157,7 @@ func (m *MockClient) Shutdown() error {
 }
 
 // GetMetrics implements Client.GetMetrics.
-func (m *MockClient) GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, error) {
+func (m *MockClient) GetMetrics(ctx context.Context) ([]GPUMetric, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.getMetricsCalls++
@@ -173,7 +171,7 @@ func (m *MockClient) GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, erro
 }
 
 // SetMetrics sets the mock metrics to return from GetMetrics.
-func (m *MockClient) SetMetrics(metrics []gputypes.GPUMetric) {
+func (m *MockClient) SetMetrics(metrics []GPUMetric) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.metrics = metrics

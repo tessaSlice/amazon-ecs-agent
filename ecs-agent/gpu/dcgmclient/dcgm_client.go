@@ -13,7 +13,7 @@
 // express or implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-package dcgmclient
+package gpu
 
 import (
 	"context"
@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
-	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"go.uber.org/zap"
 )
 
@@ -145,6 +144,43 @@ var restartAppXIDCodes = map[uint64]bool{
 	131: true, 132: true, 133: true, 134: true, 135: true, 139: true,
 }
 
+// GPUMetric holds per-device GPU telemetry collected from DCGM.
+// All fields use pointers so that a nil value indicates the metric was unavailable
+// (e.g. metrics on older GPUs that don't support certain fields).
+type GPUMetric struct {
+	// GPUUUID is the unique identifier for the GPU device (e.g. "GPU-91b959f7-0011-6abd-bfcb-6cb736c60e84").
+	// Used for container-to-GPU mapping in the metrics pipeline.
+	GPUUUID string
+
+	// GPUUtilization is the GPU compute utilization percentage (0-100).
+	// DCGM field: DCGM_FI_DEV_GPU_UTIL.
+	GPUUtilization *float64
+
+	// MemoryUtilization is the GPU memory utilization percentage (0-100).
+	// DCGM field: DCGM_FI_DEV_FB_USED_PERCENT (framebuffer used ratio 0.0-1.0, scaled ×100).
+	MemoryUtilization *float64
+
+	// MemoryTotal is the total GPU framebuffer memory in bytes.
+	// DCGM field: DCGM_FI_DEV_FB_TOTAL. Converted from MiB to bytes.
+	MemoryTotal *uint64
+
+	// MemoryUsed is the used GPU framebuffer memory in bytes.
+	// DCGM field: DCGM_FI_DEV_FB_USED. Converted from MiB to bytes.
+	MemoryUsed *uint64
+
+	// PowerDraw is the current GPU power consumption in watts.
+	// DCGM field: DCGM_FI_DEV_POWER_USAGE.
+	PowerDraw *float64
+
+	// Temperature is the current GPU temperature in degrees Celsius.
+	// DCGM field: DCGM_FI_DEV_GPU_TEMP.
+	Temperature *float64
+
+	// RestartAppXidCount is the number of RESTART_APP XID errors since the last collection tick.
+	// Populated from DCGM_FI_DEV_XID_ERRORS via GetValuesSince.
+	RestartAppXidCount int64
+}
+
 // Client provides an interface for monitoring Nvidia GPU health through the
 // Nvidia vended Data Center GPU Monitor (DCGM).
 type Client interface {
@@ -170,7 +206,7 @@ type Client interface {
 	// Returns a slice of GPUMetric, one per GPU device, including per-GPU RESTART_APP XID counts.
 	// Individual metric fields may be nil if the metric is unavailable for a device.
 	// Returns an error if the client is not connected or DCGM communication fails.
-	GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, error)
+	GetMetrics(ctx context.Context) ([]GPUMetric, error)
 
 	// Shutdown cleans up DCGM resources and closes connections.
 	Shutdown() error
@@ -674,7 +710,7 @@ func (c *dcgmClient) shutdownLocked() error {
 // GetMetrics collects GPU telemetry metrics from all supported devices.
 // Returns a slice of GPUMetric, one per GPU. Individual metric fields may be nil
 // if the persistent field watch is not active or a field value is unavailable.
-func (c *dcgmClient) GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, error) {
+func (c *dcgmClient) GetMetrics(ctx context.Context) ([]GPUMetric, error) {
 	c.mu.RLock()
 	connected := c.connected
 	metricsWatchActive := c.metricsWatchActive
@@ -695,7 +731,7 @@ func (c *dcgmClient) GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, erro
 
 	c.logger.Debug("collecting metrics for GPU devices", zap.Int("deviceCount", len(gpus)))
 
-	metrics := make([]gputypes.GPUMetric, len(gpus))
+	metrics := make([]GPUMetric, len(gpus))
 	for i, gpu := range gpus {
 		// Query all metrics (including UUID and total memory) via the persistent field watch.
 		if metricsWatchActive {
@@ -748,7 +784,7 @@ func (c *dcgmClient) GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, erro
 // extractMetricsFromFieldValues populates a GPUMetric from raw DCGM field values.
 // The values slice must correspond to metricsFields in the same order.
 // Returns the names of fields that were skipped due to sentinel or invalid values.
-func extractMetricsFromFieldValues(metric *gputypes.GPUMetric, values []dcgm.FieldValue_v1) []string {
+func extractMetricsFromFieldValues(metric *GPUMetric, values []dcgm.FieldValue_v1) []string {
 	var skipped []string
 
 	if fieldIdxUUID < len(values) && values[fieldIdxUUID].Status == 0 {
