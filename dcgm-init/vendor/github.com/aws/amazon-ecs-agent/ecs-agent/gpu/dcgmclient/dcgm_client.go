@@ -22,8 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"go.uber.org/zap"
 )
 
