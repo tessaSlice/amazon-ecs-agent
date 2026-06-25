@@ -8,8 +8,11 @@ require github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgmclient v0.0.0
 
 replace github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgmclient => ../ecs-agent/gpu/dcgmclient
 
+replace github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types => ../ecs-agent/gpu/types
+
 require (
 	github.com/NVIDIA/go-dcgm v0.0.0-20251203192032-7ac2f778d507 // indirect
+	github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types v0.0.0 // indirect
 	github.com/bits-and-blooms/bitset v1.22.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

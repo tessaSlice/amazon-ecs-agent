@@ -49,3 +49,4 @@ pkg/
 .vscode/
 .kiro/
 !.kiro/steering/
+dcgm-init/dcgm-init
