@@ -1,9 +1,6 @@
 # github.com/NVIDIA/go-dcgm v0.0.0-20251203192032-7ac2f778d507
 ## explicit; go 1.23
 github.com/NVIDIA/go-dcgm/pkg/dcgm
-# github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types v0.0.0 => ../types
-## explicit; go 1.25.0
-github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types
 # github.com/bits-and-blooms/bitset v1.22.0
 ## explicit; go 1.16
 github.com/bits-and-blooms/bitset
