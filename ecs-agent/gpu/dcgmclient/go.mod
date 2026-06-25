@@ -6,6 +6,7 @@ toolchain go1.25.9
 
 require (
 	github.com/NVIDIA/go-dcgm v0.0.0-20251203192032-7ac2f778d507
+	github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types v0.0.0
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.0
 )
