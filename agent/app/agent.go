@@ -713,6 +713,11 @@ func (agent *ecsAgent) newDoctorWithHealthchecks(cluster, containerInstanceARN s
 		runtimeHealthCheck,
 	}
 
+	if agent.cfg.GPUSupportEnabled {
+		gpuHealthCheck := dockerdoctor.NewGPUHealthcheck("")
+		healthcheckList = append(healthcheckList, gpuHealthCheck)
+	}
+
 	// set up the doctor and return it
 	return doctor.NewDoctor(healthcheckList, cluster, containerInstanceARN)
 }
