@@ -290,6 +290,10 @@ type dcgmClient struct {
 	// deviceIndexToUUID maps GPU device index to UUID. Populated during GetMetrics.
 	deviceIndexToUUID map[uint]string
 
+	// fieldGroupDestroyFunc is the function used to destroy DCGM field groups.
+	// Defaults to dcgm.FieldGroupDestroy; overridable in tests.
+	fieldGroupDestroyFunc func(dcgm.FieldHandle) error
+
 	// Mutex for thread-safe access to state.
 	mu sync.RWMutex
 
@@ -313,6 +317,7 @@ func NewClient(config Config) Client {
 		socketPath:                socketPath,
 		initializationGracePeriod: gracePeriod,
 		lastShutdown:              time.Now(),
+		fieldGroupDestroyFunc:     dcgm.FieldGroupDestroy,
 	}
 }
 
@@ -412,8 +417,8 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 
 	// Wait for initialization with timeout.
 	const initTimeout = 10 * time.Second
-	timeoutCtx, cancel := context.WithTimeout(ctx, initTimeout)
-	defer cancel()
+	timeoutCtx, cancelTimeout := context.WithTimeout(ctx, initTimeout)
+	defer cancelTimeout()
 
 	var result initResult
 	select {
@@ -432,10 +437,10 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	log.Info("Successfully connected to host engine")
 
 	// Create context for policy violation listener.
-	policyCtx, cancel := context.WithCancel(ctx)
+	policyCtx, cancelPolicy := context.WithCancel(ctx)
 	c.ctx = policyCtx
-	c.cancelPolicyListener = cancel
-	c.shutdownHandlers = append(c.shutdownHandlers, cancel)
+	c.cancelPolicyListener = cancelPolicy
+	c.shutdownHandlers = append(c.shutdownHandlers, cancelPolicy)
 
 	// Register policy violation listeners for all required policies.
 	// These policies monitor critical GPU health indicators that signal hardware degradation or failure.
@@ -449,7 +454,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	if err != nil {
 		log.Errorf("Failed to register policy listeners: %v", err)
 		c.shutdownHandlers = nil
-		cancel()
+		cancelPolicy()
 		if c.cleanupFunc != nil {
 			c.cleanupFunc()
 		}
@@ -466,7 +471,7 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	if err := dcgm.HealthSet(dcgm.GroupAllGPUs(), dcgm.DCGM_HEALTH_WATCH_ALL); err != nil {
 		log.Errorf("Failed to enable health check systems: %v", err)
 		c.shutdownHandlers = nil
-		cancel()
+		cancelPolicy()
 		if c.cleanupFunc != nil {
 			c.cleanupFunc()
 		}
@@ -652,6 +657,18 @@ func (c *dcgmClient) shutdownLocked() error {
 	}
 	c.shutdownHandlers = nil
 
+	// Destroy field groups before disconnecting to free names on nv-hostengine.
+	if c.metricsWatchActive {
+		if err := c.fieldGroupDestroyFunc(c.metricsFieldGroup); err != nil {
+			c.logger.Debug("failed to destroy metrics field group", zap.Error(err))
+		}
+	}
+	if c.xidWatchActive {
+		if err := c.fieldGroupDestroyFunc(c.xidFieldGroup); err != nil {
+			c.logger.Debug("failed to destroy XID field group", zap.Error(err))
+		}
+	}
+
 	// Call cleanup function to disconnect from host engine.
 	if c.cleanupFunc != nil {
 		c.cleanupFunc()
@@ -816,7 +833,7 @@ func (c *dcgmClient) setupMetricsWatches() {
 	err = dcgm.WatchFieldsWithGroup(fieldGroup, dcgm.GroupAllGPUs())
 	if err != nil {
 		log.Errorf("Failed to watch metrics fields: %v", err)
-		if destroyErr := dcgm.FieldGroupDestroy(fieldGroup); destroyErr != nil {
+		if destroyErr := c.fieldGroupDestroyFunc(fieldGroup); destroyErr != nil {
 			log.Debugf("Failed to destroy unused metrics field group: %v", destroyErr)
 		}
 		return
@@ -842,7 +859,7 @@ func (c *dcgmClient) setupXidWatch() {
 	err = dcgm.WatchFieldsWithGroup(fieldGroup, dcgm.GroupAllGPUs())
 	if err != nil {
 		log.Errorf("Failed to watch XID fields, XID counting disabled: %v", err)
-		if destroyErr := dcgm.FieldGroupDestroy(fieldGroup); destroyErr != nil {
+		if destroyErr := c.fieldGroupDestroyFunc(fieldGroup); destroyErr != nil {
 			log.Debugf("Failed to destroy unused XID field group: %v", destroyErr)
 		}
 		return
