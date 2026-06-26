@@ -16,24 +16,13 @@
 package doctor
 
 import (
-	"encoding/json"
-	"os"
 	"sync"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 	"github.com/cihub/seelog"
 )
-
-const (
-	defaultGPUMetricsFilePath = "/var/run/ecs/gpu-metrics.json"
-)
-
-type gpuMetricsFileData struct {
-	Timestamp       string `json:"timestamp"`
-	Healthy         bool   `json:"healthy"`
-	UnhealthyReason string `json:"unhealthy_reason,omitempty"`
-}
 
 type gpuHealthcheck struct {
 	HealthcheckType  string
@@ -43,16 +32,13 @@ type gpuHealthcheck struct {
 	LastStatus       ecstcs.InstanceHealthCheckStatus
 	LastTimeStamp    time.Time
 
-	filePath string
-	lock     sync.RWMutex
+	handler *gpu.DCGMHandler
+	lock    sync.RWMutex
 }
 
-// NewGPUHealthcheck creates a new GPU health check that reads health status
-// from the shared GPU metrics file written by dcgm-init.
-func NewGPUHealthcheck(filePath string) *gpuHealthcheck {
-	if filePath == "" {
-		filePath = defaultGPUMetricsFilePath
-	}
+// NewGPUHealthcheck creates a new GPU health check that queries the DCGMHandler
+// for health status from the shared GPU metrics file written by dcgm-init.
+func NewGPUHealthcheck(handler *gpu.DCGMHandler) *gpuHealthcheck {
 	nowTime := timeNow()
 	return &gpuHealthcheck{
 		HealthcheckType:  ecstcs.InstanceHealthCheckTypeAcceleratedCompute,
@@ -60,31 +46,24 @@ func NewGPUHealthcheck(filePath string) *gpuHealthcheck {
 		TimeStamp:        nowTime,
 		StatusChangeTime: nowTime,
 		LastTimeStamp:    nowTime,
-		filePath:         filePath,
+		handler:          handler,
 	}
 }
 
-// RunCheck reads the GPU metrics file and determines health status.
+// RunCheck queries the DCGMHandler for GPU health status.
 func (ghc *gpuHealthcheck) RunCheck() ecstcs.InstanceHealthCheckStatus {
-	data, err := os.ReadFile(ghc.filePath)
-	if err != nil {
-		seelog.Debugf("[GPUHealthcheck] GPU metrics file not available: %v", err)
-		ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
-		return ecstcs.InstanceHealthCheckStatusInsufficientData
-	}
-
-	var fileData gpuMetricsFileData
-	if err := json.Unmarshal(data, &fileData); err != nil {
-		seelog.Warnf("[GPUHealthcheck] Failed to parse GPU metrics file: %v", err)
+	healthStatus := ghc.handler.GetGPUHealthStatus()
+	if healthStatus == nil {
+		seelog.Debug("[GPUHealthcheck] GPU health status not available")
 		ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
 		return ecstcs.InstanceHealthCheckStatusInsufficientData
 	}
 
 	var resultStatus ecstcs.InstanceHealthCheckStatus
-	if fileData.Healthy {
+	if healthStatus.Healthy {
 		resultStatus = ecstcs.InstanceHealthCheckStatusOk
 	} else {
-		seelog.Infof("[GPUHealthcheck] GPU reported unhealthy: %s", fileData.UnhealthyReason)
+		seelog.Infof("[GPUHealthcheck] GPU reported unhealthy: %s", healthStatus.UnhealthyReason)
 		resultStatus = ecstcs.InstanceHealthCheckStatusImpaired
 	}
 

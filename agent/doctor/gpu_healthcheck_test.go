@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,8 @@ func TestGPUHealthcheckReportsOkWhenHealthy(t *testing.T) {
 	}`), 0644)
 	require.NoError(t, err)
 
-	hc := NewGPUHealthcheck(filePath)
+	handler := gpu.NewDCGMHandler(filePath)
+	hc := NewGPUHealthcheck(handler)
 	status := hc.RunCheck()
 
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, status)
@@ -55,14 +57,16 @@ func TestGPUHealthcheckReportsImpairedWhenUnhealthy(t *testing.T) {
 	}`), 0644)
 	require.NoError(t, err)
 
-	hc := NewGPUHealthcheck(filePath)
+	handler := gpu.NewDCGMHandler(filePath)
+	hc := NewGPUHealthcheck(handler)
 	status := hc.RunCheck()
 
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusImpaired, status)
 }
 
 func TestGPUHealthcheckReportsInsufficientDataWhenFileMissing(t *testing.T) {
-	hc := NewGPUHealthcheck("/nonexistent/gpu-metrics.json")
+	handler := gpu.NewDCGMHandler("/nonexistent/gpu-metrics.json")
+	hc := NewGPUHealthcheck(handler)
 	status := hc.RunCheck()
 
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status)
@@ -75,7 +79,8 @@ func TestGPUHealthcheckReportsInsufficientDataWhenFileCorrupt(t *testing.T) {
 	err := os.WriteFile(filePath, []byte(`not valid json{{{`), 0644)
 	require.NoError(t, err)
 
-	hc := NewGPUHealthcheck(filePath)
+	handler := gpu.NewDCGMHandler(filePath)
+	hc := NewGPUHealthcheck(handler)
 	status := hc.RunCheck()
 
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status)
@@ -85,11 +90,11 @@ func TestGPUHealthcheckStatusTransition(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	// Start healthy
 	err := os.WriteFile(filePath, []byte(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"gpus":[]}`), 0644)
 	require.NoError(t, err)
 
-	hc := NewGPUHealthcheck(filePath)
+	handler := gpu.NewDCGMHandler(filePath)
+	hc := NewGPUHealthcheck(handler)
 	status := hc.RunCheck()
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, status)
 
@@ -100,9 +105,4 @@ func TestGPUHealthcheckStatusTransition(t *testing.T) {
 	status = hc.RunCheck()
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusImpaired, status)
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, hc.GetLastHealthcheckStatus())
-}
-
-func TestGPUHealthcheckDefaultFilePath(t *testing.T) {
-	hc := NewGPUHealthcheck("")
-	assert.Equal(t, defaultGPUMetricsFilePath, hc.filePath)
 }

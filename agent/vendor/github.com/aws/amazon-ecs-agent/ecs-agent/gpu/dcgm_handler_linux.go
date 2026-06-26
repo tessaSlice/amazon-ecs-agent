@@ -34,15 +34,19 @@ const (
 
 // GPUMetricsFileData represents the JSON structure written by dcgm-init.
 type GPUMetricsFileData struct {
-	Timestamp string      `json:"timestamp"`
-	GPUs      []GPUMetric `json:"gpus"`
+	Timestamp       string      `json:"timestamp"`
+	Healthy         bool        `json:"healthy"`
+	UnhealthyReason string      `json:"unhealthy_reason,omitempty"`
+	GPUs            []GPUMetric `json:"gpus"`
 }
 
 // GPUMetricsResult holds the parsed GPU metrics along with the timestamp
-// from dcgm-init. Callers use the timestamp to detect stale data.
+// and health status from dcgm-init. Callers use the timestamp to detect stale data.
 type GPUMetricsResult struct {
-	Timestamp string
-	Metrics   []GPUMetric
+	Timestamp       string
+	Healthy         bool
+	UnhealthyReason string
+	Metrics         []GPUMetric
 }
 
 // DCGMHandler reads GPU metrics from the shared file written by dcgm-init
@@ -84,7 +88,28 @@ func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult {
 	}
 
 	return &GPUMetricsResult{
-		Timestamp: fileData.Timestamp,
-		Metrics:   fileData.GPUs,
+		Timestamp:       fileData.Timestamp,
+		Healthy:         fileData.Healthy,
+		UnhealthyReason: fileData.UnhealthyReason,
+		Metrics:         fileData.GPUs,
+	}
+}
+
+// GPUHealthStatus holds the health state from the GPU metrics file.
+type GPUHealthStatus struct {
+	Healthy         bool
+	UnhealthyReason string
+}
+
+// GetGPUHealthStatus returns the GPU health status from the shared metrics file.
+// Returns nil if the file is unavailable or corrupt.
+func (h *DCGMHandler) GetGPUHealthStatus() *GPUHealthStatus {
+	result := h.GetGPUMetrics()
+	if result == nil {
+		return nil
+	}
+	return &GPUHealthStatus{
+		Healthy:         result.Healthy,
+		UnhealthyReason: result.UnhealthyReason,
 	}
 }

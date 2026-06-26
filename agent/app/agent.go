@@ -29,7 +29,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/sdkclientfactory"
-	dockerdoctor "github.com/aws/amazon-ecs-agent/agent/doctor" // for Docker specific container instance health checks
+	dockerdoctor "github.com/aws/amazon-ecs-agent/agent/doctor"
 	"github.com/aws/amazon-ecs-agent/agent/ebs"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
@@ -63,6 +63,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/ecs-agent/doctor"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/ec2"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/eventstream"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger/field"
 	metricsfactory "github.com/aws/amazon-ecs-agent/ecs-agent/metrics"
@@ -714,7 +715,8 @@ func (agent *ecsAgent) newDoctorWithHealthchecks(cluster, containerInstanceARN s
 	}
 
 	if agent.cfg.GPUSupportEnabled {
-		gpuHealthCheck := dockerdoctor.NewGPUHealthcheck("")
+		gpuHandler := gpu.NewDCGMHandler("")
+		gpuHealthCheck := dockerdoctor.NewGPUHealthcheck(gpuHandler)
 		healthcheckList = append(healthcheckList, gpuHealthCheck)
 	}
 
