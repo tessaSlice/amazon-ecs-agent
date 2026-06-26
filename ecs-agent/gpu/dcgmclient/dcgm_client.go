@@ -39,6 +39,25 @@ const (
 	mibToBytes = 1024 * 1024
 )
 
+// DCGM sentinel values from dcgm_structs.h. Each width (32-bit and 64-bit)
+// defines four consecutive sentinels starting at the BLANK value:
+//
+//	BLANK          — field exists but no sample collected yet.
+//	NOT_FOUND      — field ID not recognised by this DCGM version.
+//	NOT_SUPPORTED  — field not supported on this GPU/driver.
+//	NOT_PERMISSIONED — insufficient permissions to read this field.
+const (
+	int32Blank           = 0x7ffffff0
+	int32NotFound        = 0x7ffffff1
+	int32NotSupported    = 0x7ffffff2
+	int32NotPermissioned = 0x7ffffff3
+
+	int64Blank           = 0x7ffffffffffffff0
+	int64NotFound        = 0x7ffffffffffffff1
+	int64NotSupported    = 0x7ffffffffffffff2
+	int64NotPermissioned = 0x7ffffffffffffff3
+)
+
 // metricsFieldDef pairs a DCGM field ID with its human-readable name.
 // This is the single source of truth for the basic GPU metrics we watch.
 type metricsFieldDef struct {
@@ -895,23 +914,7 @@ func mapDeviceIndexToUUID(countsByDevice map[uint]int64, deviceToUUID map[uint]s
 // isValidInt64Value checks if a DCGM int64 value is valid (not a sentinel/blank value).
 // DCGM uses specific sentinel values to indicate unavailable or blank data.
 func isValidInt64Value(v int64) bool {
-	// DCGM sentinel values from dcgm_structs.h. Each width (32-bit and 64-bit)
-	// defines four consecutive sentinels starting at the BLANK value:
-	//   BLANK          — field exists but no sample collected yet.
-	//   NOT_FOUND      — field ID not recognised by this DCGM version.
-	//   NOT_SUPPORTED  — field not supported on this GPU/driver.
-	//   NOT_PERMISSIONED — insufficient permissions to read this field.
-	const (
-		int32Blank           = 0x7ffffff0
-		int32NotFound        = 0x7ffffff1
-		int32NotSupported    = 0x7ffffff2
-		int32NotPermissioned = 0x7ffffff3
 
-		int64Blank           = 0x7ffffffffffffff0
-		int64NotFound        = 0x7ffffffffffffff1
-		int64NotSupported    = 0x7ffffffffffffff2
-		int64NotPermissioned = 0x7ffffffffffffff3
-	)
 	return v != int32Blank && v != int32NotFound && v != int32NotSupported && v != int32NotPermissioned &&
 		v != int64Blank && v != int64NotFound && v != int64NotSupported && v != int64NotPermissioned
 }
@@ -1011,32 +1014,33 @@ func (c *dcgmClient) logPolicyViolation(violation dcgm.PolicyViolation) {
 	}
 }
 
+// Map of XID codes to human-readable messages.
+// Based on NVIDIA XID error documentation.
+var messages = map[uint64]string{
+	46:  "GPU stopped processing",
+	48:  "Double Bit ECC Error",
+	54:  "Auxiliary power connector not connected",
+	62:  "Internal micro-controller halt",
+	64:  "GPU memory remapping failure",
+	74:  "NVLink Error",
+	79:  "GPU has fallen off the bus",
+	95:  "Uncontained memory error",
+	109: "Context switch timeout",
+	110: "GPU disappeared from the bus",
+	136: "GPU memory page retirement limit exceeded",
+	140: "Unrecoverable ECC Error",
+	142: "GPU memory page retired due to uncorrectable error",
+	143: "GPU memory page retired due to correctable error threshold",
+	151: "GPU to CPU interconnect error",
+	155: "GPU NVLink flit CRC error",
+	156: "GPU NVLink lane error",
+	158: "GPU InfoROM corrupted",
+}
+
 // getXIDMessage returns a human-readable message for a given XID error code.
 // For well-known XID codes, it returns a descriptive message explaining the error.
 // For unknown codes, it returns a generic message.
 func getXIDMessage(code uint64) string {
-	// Map of XID codes to human-readable messages.
-	// Based on NVIDIA XID error documentation.
-	messages := map[uint64]string{
-		46:  "GPU stopped processing",
-		48:  "Double Bit ECC Error",
-		54:  "Auxiliary power connector not connected",
-		62:  "Internal micro-controller halt",
-		64:  "GPU memory remapping failure",
-		74:  "NVLink Error",
-		79:  "GPU has fallen off the bus",
-		95:  "Uncontained memory error",
-		109: "Context switch timeout",
-		110: "GPU disappeared from the bus",
-		136: "GPU memory page retirement limit exceeded",
-		140: "Unrecoverable ECC Error",
-		142: "GPU memory page retired due to uncorrectable error",
-		143: "GPU memory page retired due to correctable error threshold",
-		151: "GPU to CPU interconnect error",
-		155: "GPU NVLink flit CRC error",
-		156: "GPU NVLink lane error",
-		158: "GPU InfoROM corrupted",
-	}
 
 	if msg, ok := messages[code]; ok {
 		return msg
