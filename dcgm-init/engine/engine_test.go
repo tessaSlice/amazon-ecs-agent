@@ -183,3 +183,84 @@ func TestCollectAndWriteAtomicRename(t *testing.T) {
 	_, err = os.Stat(outputPath + ".staging")
 	assert.True(t, os.IsNotExist(err), "Staging file should not exist after rename")
 }
+
+func TestCollectAndWriteReportsHealthyStatus(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	mockClient := gpu.NewMockClient()
+	mockClient.SetInitialized(true)
+	mockClient.SetHealthy(true)
+	mockClient.SetMetrics([]gpu.GPUMetric{
+		{GPUUUID: "GPU-healthy-001"},
+	})
+
+	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
+
+	err := eng.collectAndWrite(context.Background())
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+
+	var output metricsOutput
+	err = json.Unmarshal(data, &output)
+	require.NoError(t, err)
+
+	assert.True(t, output.Healthy, "Healthy GPU should report healthy=true")
+	assert.Empty(t, output.UnhealthyReason, "Healthy GPU should have no unhealthy reason")
+}
+
+func TestCollectAndWriteReportsUnhealthyStatus(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	mockClient := gpu.NewMockClient()
+	mockClient.SetInitialized(true)
+	mockClient.SetHealthy(false)
+	mockClient.SetUnhealthyReason("XID_48")
+	mockClient.SetMetrics([]gpu.GPUMetric{
+		{GPUUUID: "GPU-unhealthy-001"},
+	})
+
+	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
+
+	err := eng.collectAndWrite(context.Background())
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+
+	var output metricsOutput
+	err = json.Unmarshal(data, &output)
+	require.NoError(t, err)
+
+	assert.False(t, output.Healthy, "Unhealthy GPU should report healthy=false")
+	assert.Equal(t, "XID_48", output.UnhealthyReason, "Should report the XID error code")
+}
+
+func TestCollectAndWriteReportsUnhealthyWhenNotInitialized(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	mockClient := gpu.NewMockClient()
+	mockClient.SetInitialized(true)
+	mockClient.SetHealthy(false)
+	mockClient.SetMetrics([]gpu.GPUMetric{
+		{GPUUUID: "GPU-disconnected-001"},
+	})
+
+	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
+
+	err := eng.collectAndWrite(context.Background())
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+
+	var output metricsOutput
+	err = json.Unmarshal(data, &output)
+	require.NoError(t, err)
+
+	assert.False(t, output.Healthy, "Should report unhealthy when client is not healthy")
+}

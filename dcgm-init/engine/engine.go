@@ -125,8 +125,10 @@ func (e *Engine) run(ctx context.Context) error {
 }
 
 type metricsOutput struct {
-	Timestamp string          `json:"timestamp"`
-	GPUs      []gpuMetricJSON `json:"gpus"`
+	Timestamp       string          `json:"timestamp"`
+	Healthy         bool            `json:"healthy"`
+	UnhealthyReason string          `json:"unhealthy_reason,omitempty"`
+	GPUs            []gpuMetricJSON `json:"gpus"`
 }
 
 type gpuMetricJSON struct {
@@ -161,8 +163,10 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 	}
 
 	output := metricsOutput{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		GPUs:      gpus,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		Healthy:         e.client.IsHealthy(),
+		UnhealthyReason: e.client.UnhealthyReason(),
+		GPUs:            gpus,
 	}
 
 	data, err := json.MarshalIndent(output, "", "  ")
