@@ -309,21 +309,24 @@ func TestClient_ContextCancellation(t *testing.T) {
 	assert.NoError(t, err, "Cancelling context should not cause panics or errors")
 }
 
-// TestClient_LoggerUsage tests that logger is properly used.
+// TestClient_LoggerUsage exercises the logging-heavy reconcile error path and
+// verifies the grace-period contract: when DCGM is unavailable but the client is
+// within its initialization grace period, Reconcile suppresses the error.
 func TestClient_LoggerUsage(t *testing.T) {
 	t.Parallel()
 
-	// Create a logger that captures logs.
 	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Attempt to reconcile (will fail and log error).
-	_, _ = client.Reconcile(ctx)
+	// DCGM is unavailable in tests, so initialization fails. Because the client
+	// is within its grace period, Reconcile must suppress the failure and report
+	// that nothing was reinitialized.
+	justInitialized, err := client.Reconcile(ctx)
 
-	// If we reach here without panic, logger is working.
-	assert.True(t, true, "Client should use logger for error messages")
+	assert.NoError(t, err, "Reconcile should suppress initialization errors within the grace period")
+	assert.False(t, justInitialized, "Reconcile should not report reinitialization when init fails")
 }
 
 // TestClient_HealthyStateProducesCorrectStatus tests that healthy client state produces OK status.
