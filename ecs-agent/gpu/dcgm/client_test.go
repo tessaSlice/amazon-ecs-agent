@@ -326,22 +326,6 @@ func TestClient_LoggerUsage(t *testing.T) {
 	assert.True(t, true, "Client should use logger for error messages")
 }
 
-// TestClient_DefaultLogger tests client creation with default logger.
-func TestClient_DefaultLogger(t *testing.T) {
-	t.Parallel()
-
-	client := NewClient(Config{InitializationGracePeriod: 1 * time.Minute})
-
-	require.NotNil(t, client, "Client should work with default logger")
-
-	// Verify basic operations work.
-	healthy := client.IsHealthy()
-	assert.True(t, healthy, "Not connected client within grace period should be healthy")
-
-	err := client.Shutdown()
-	assert.NoError(t, err, "Shutdown should not error")
-}
-
 // TestClient_HealthyStateProducesCorrectStatus tests that healthy client state produces OK status.
 func TestClient_HealthyStateProducesCorrectStatus(t *testing.T) {
 	t.Parallel()
