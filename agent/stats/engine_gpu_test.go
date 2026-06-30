@@ -40,7 +40,9 @@ func TestGPUMetricsNotEmittedWhenTimestampStale(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	engine.ctx = ctx
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// Simulate 3 ticks to trigger GPU emission (gpuMetricsPublishCount >= 3)
@@ -71,7 +73,9 @@ func TestGPUMetricsEmittedWhenTimestampChanges(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	engine.ctx = ctx
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// First emission
@@ -107,7 +111,9 @@ func TestGPUMetricsNotEmittedBeforeThirdTick(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	engine.ctx = ctx
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// First tick (count goes to 1) — should not emit
@@ -135,7 +141,9 @@ func TestGPUMetricsNotEmittedWhenTimestampGoesBackward(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	engine.ctx = ctx
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// First emission succeeds (new timestamp)

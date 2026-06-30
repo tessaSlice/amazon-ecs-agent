@@ -544,6 +544,16 @@ func TestGPUMetricsBindMount_PresentWhenGPUEnabled(t *testing.T) {
 		return []string{"/dev/nvidia0"}, nil
 	}
 
+	// Simulate successful creation of the GPU metrics directory so the bind
+	// mount is added. (The real os.MkdirAll on /var/run/ecs may be denied in
+	// the test environment.)
+	defer func() {
+		mkdirAll = os.MkdirAll
+	}()
+	mkdirAll = func(path string, perm os.FileMode) error {
+		return nil
+	}
+
 	mockFS := NewMockfileSystem(mockCtrl)
 	mockDocker := NewMockdockerclient(mockCtrl)
 
@@ -559,6 +569,69 @@ func TestGPUMetricsBindMount_PresentWhenGPUEnabled(t *testing.T) {
 		}
 		assert.True(t, foundGPUMetricsBind,
 			"GPU metrics directory /var/run/ecs should be bind-mounted read-only when GPU enabled")
+	}).Return(&godocker.Container{
+		ID: containerID,
+	}, nil)
+	mockDocker.EXPECT().StartContainer(containerID, nil)
+	mockDocker.EXPECT().WaitContainer(containerID)
+
+	client := &client{
+		docker: mockDocker,
+		fs:     mockFS,
+	}
+
+	_, err := client.StartAgent()
+	assert.NoError(t, err)
+}
+
+// TestGPUMetricsBindMount_SkippedWhenMkdirFails verifies that when the GPU metrics
+// directory cannot be created, ecs-init skips the bind mount (rather than mounting a
+// non-existent directory, which would make Docker fail container start).
+func TestGPUMetricsBindMount_SkippedWhenMkdirFails(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+	isPathValid = func(path string, isDir bool) bool {
+		return false
+	}
+	defer func() {
+		isPathValid = defaultIsPathValid
+	}()
+
+	config.OsStat = func(name string) (os.FileInfo, error) {
+		return nil, nil
+	}
+	defer func() {
+		config.OsStat = os.Stat
+	}()
+
+	envFile := "\nECS_ENABLE_GPU_SUPPORT=true\n"
+	containerID := "container id"
+
+	defer func() {
+		MatchFilePatternForGPU = FilePatternMatchForGPU
+	}()
+	MatchFilePatternForGPU = func(pattern string) ([]string, error) {
+		return []string{"/dev/nvidia0"}, nil
+	}
+
+	// Simulate a failure creating the GPU metrics directory.
+	defer func() {
+		mkdirAll = os.MkdirAll
+	}()
+	mkdirAll = func(path string, perm os.FileMode) error {
+		return errors.New("permission denied")
+	}
+
+	mockFS := NewMockfileSystem(mockCtrl)
+	mockDocker := NewMockdockerclient(mockCtrl)
+
+	mockFS.EXPECT().ReadFile(config.InstanceConfigFile()).Return([]byte(envFile), nil).AnyTimes()
+	mockFS.EXPECT().ReadFile(config.AgentConfigFile()).Return(nil, errors.New("not found")).AnyTimes()
+	mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
+		for _, bind := range opts.HostConfig.Binds {
+			assert.False(t, strings.Contains(bind, "/var/run/ecs"),
+				"GPU metrics directory should not be bind-mounted when its creation failed")
+		}
 	}).Return(&godocker.Container{
 		ID: containerID,
 	}, nil)

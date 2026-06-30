@@ -165,6 +165,9 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 		return fmt.Errorf("failed to write metrics to %s: %w", stagingPath, err)
 	}
 	if err := os.Rename(stagingPath, e.outputPath); err != nil {
+		// Best-effort cleanup so a failed rename does not leave an orphaned
+		// staging file behind on every collection tick.
+		os.Remove(stagingPath)
 		return fmt.Errorf("failed to rename %s to %s: %w", stagingPath, e.outputPath, err)
 	}
 
