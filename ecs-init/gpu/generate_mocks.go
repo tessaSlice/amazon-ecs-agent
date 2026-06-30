@@ -13,4 +13,4 @@
 
 package gpu
 
-//go:generate mockgen -destination=mocks/mock_gpu_device.go github.com/aws/amazon-ecs-agent/ecs-init/gpu GPUDevice
+//go:generate mockgen -destination=mocks/mock_gpu_device.go -copyright_file=../../scripts/copyright_file github.com/aws/amazon-ecs-agent/ecs-init/gpu GPUDevice
