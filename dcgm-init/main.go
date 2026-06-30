@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 	"github.com/cihub/seelog"
@@ -32,8 +33,8 @@ const (
 
 func main() {
 	socketPath := flag.String("socket-path", dcgm.DefaultSocketPath, "Path to the DCGM nv-hostengine Unix domain socket")
-	outputPath := flag.String("output", dcgm.DefaultOutputPath, "Path to write GPU metrics JSON output")
-	collectionFreq := flag.Duration("interval", dcgm.DefaultCollectionFreq, "Metrics collection interval")
+	outputPath := flag.String("output", engine.DefaultOutputPath, "Path to write GPU metrics JSON output")
+	collectionFreq := flag.Duration("interval", engine.DefaultCollectionFreq, "Metrics collection interval")
 	oneShot := flag.Bool("once", false, "Collect metrics once and exit")
 	flag.Parse()
 
@@ -48,7 +49,7 @@ func main() {
 
 	logger.Info("dcgm-init invoked", logger.Fields{"command": args[0]})
 
-	eng := dcgm.NewEngine(*socketPath, *outputPath, *collectionFreq, *oneShot)
+	eng := engine.New(*socketPath, *outputPath, *collectionFreq, *oneShot)
 	actions := actions(eng)
 
 	action, ok := actions[args[0]]
@@ -67,7 +68,7 @@ type action struct {
 	description string
 }
 
-func actions(eng *dcgm.Engine) map[string]action {
+func actions(eng *engine.Engine) map[string]action {
 	return map[string]action{
 		START: {
 			function:    eng.Start,

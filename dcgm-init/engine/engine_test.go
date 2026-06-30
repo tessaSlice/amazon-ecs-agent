@@ -13,7 +13,7 @@
 // express or implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-package dcgm
+package engine
 
 import (
 	"context"
@@ -23,12 +23,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm"
+	mock_dcgm "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm/mocks"
 	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func newTestEngine(client Client, outputPath string, collectionFreq time.Duration, oneShot bool) *Engine {
+func newTestEngine(client dcgm.Client, outputPath string, collectionFreq time.Duration, oneShot bool) *Engine {
 	return &Engine{
 		client:         client,
 		outputPath:     outputPath,
@@ -38,14 +41,19 @@ func newTestEngine(client Client, outputPath string, collectionFreq time.Duratio
 }
 
 func TestRunExitsOnContextCancellation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	mockClient := NewMockClient()
-	mockClient.SetReconcileJustInit(true)
-	mockClient.SetMetrics([]gputypes.GPUMetric{
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
 		{GPUUUID: "GPU-test-001"},
-	})
+	}, nil).AnyTimes()
+	mockClient.EXPECT().IsHealthy().Return(false).AnyTimes()
+	mockClient.EXPECT().UnhealthyReason().Return("").AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
@@ -62,14 +70,19 @@ func TestRunExitsOnContextCancellation(t *testing.T) {
 }
 
 func TestRunOneShotCollectsAndExits(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	mockClient := NewMockClient()
-	mockClient.SetReconcileJustInit(true)
-	mockClient.SetMetrics([]gputypes.GPUMetric{
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
 		{GPUUUID: "GPU-test-001"},
-	})
+	}, nil).AnyTimes()
+	mockClient.EXPECT().IsHealthy().Return(false).AnyTimes()
+	mockClient.EXPECT().UnhealthyReason().Return("").AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, true)
 
@@ -90,11 +103,14 @@ func TestRunOneShotCollectsAndExits(t *testing.T) {
 }
 
 func TestRunReconcileFailureReturnsError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	mockClient := NewMockClient()
-	mockClient.SetReconcileError(assert.AnError)
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().Reconcile(gomock.Any()).Return(false, assert.AnError).AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
@@ -113,6 +129,9 @@ func TestStopReturnsNil(t *testing.T) {
 }
 
 func TestCollectAndWriteCreatesValidJSON(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
@@ -123,9 +142,8 @@ func TestCollectAndWriteCreatesValidJSON(t *testing.T) {
 	power := 250.5
 	temp := 72.0
 
-	mockClient := NewMockClient()
-	mockClient.SetInitialized(true)
-	mockClient.SetMetrics([]gputypes.GPUMetric{
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
 		{
 			GPUUUID:            "GPU-abc-123",
 			GPUUtilization:     &utilization,
@@ -136,7 +154,9 @@ func TestCollectAndWriteCreatesValidJSON(t *testing.T) {
 			Temperature:        &temp,
 			RestartAppXidCount: 0,
 		},
-	})
+	}, nil).AnyTimes()
+	mockClient.EXPECT().IsHealthy().Return(true).AnyTimes()
+	mockClient.EXPECT().UnhealthyReason().Return("").AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
@@ -163,14 +183,18 @@ func TestCollectAndWriteCreatesValidJSON(t *testing.T) {
 }
 
 func TestCollectAndWriteAtomicRename(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	mockClient := NewMockClient()
-	mockClient.SetInitialized(true)
-	mockClient.SetMetrics([]gputypes.GPUMetric{
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
 		{GPUUUID: "GPU-test-001"},
-	})
+	}, nil).AnyTimes()
+	mockClient.EXPECT().IsHealthy().Return(true).AnyTimes()
+	mockClient.EXPECT().UnhealthyReason().Return("").AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
@@ -187,15 +211,18 @@ func TestCollectAndWriteAtomicRename(t *testing.T) {
 }
 
 func TestCollectAndWriteReportsHealthyStatus(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	mockClient := NewMockClient()
-	mockClient.SetInitialized(true)
-	mockClient.SetHealthy(true)
-	mockClient.SetMetrics([]gputypes.GPUMetric{
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
 		{GPUUUID: "GPU-healthy-001"},
-	})
+	}, nil).AnyTimes()
+	mockClient.EXPECT().IsHealthy().Return(true).AnyTimes()
+	mockClient.EXPECT().UnhealthyReason().Return("").AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
@@ -214,16 +241,18 @@ func TestCollectAndWriteReportsHealthyStatus(t *testing.T) {
 }
 
 func TestCollectAndWriteReportsUnhealthyStatus(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	mockClient := NewMockClient()
-	mockClient.SetInitialized(true)
-	mockClient.SetHealthy(false)
-	mockClient.SetUnhealthyReason("XID_48")
-	mockClient.SetMetrics([]gputypes.GPUMetric{
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
 		{GPUUUID: "GPU-unhealthy-001"},
-	})
+	}, nil).AnyTimes()
+	mockClient.EXPECT().IsHealthy().Return(false).AnyTimes()
+	mockClient.EXPECT().UnhealthyReason().Return("XID_48").AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
@@ -242,15 +271,18 @@ func TestCollectAndWriteReportsUnhealthyStatus(t *testing.T) {
 }
 
 func TestCollectAndWriteReportsUnhealthyWhenNotInitialized(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
 
-	mockClient := NewMockClient()
-	mockClient.SetInitialized(true)
-	mockClient.SetHealthy(false)
-	mockClient.SetMetrics([]gputypes.GPUMetric{
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
 		{GPUUUID: "GPU-disconnected-001"},
-	})
+	}, nil).AnyTimes()
+	mockClient.EXPECT().IsHealthy().Return(false).AnyTimes()
+	mockClient.EXPECT().UnhealthyReason().Return("").AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 

@@ -13,7 +13,7 @@
 // express or implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-package dcgm
+package engine
 
 import (
 	"context"
@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm"
 	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 )
@@ -39,24 +40,24 @@ const (
 )
 
 // Engine drives the dcgm-init metrics collection loop: it connects to DCGM via
-// the Client, periodically collects GPU metrics, and writes them to a shared
+// the dcgm.Client, periodically collects GPU metrics, and writes them to a shared
 // JSON file that the agent reads through gpu.DCGMHandler.
 type Engine struct {
-	client         Client
+	client         dcgm.Client
 	outputPath     string
 	collectionFreq time.Duration
 	oneShot        bool
 }
 
-// NewEngine creates an Engine with the given configuration.
-func NewEngine(socketPath string, outputPath string, collectionFreq time.Duration, oneShot bool) *Engine {
-	config := Config{
+// New creates an Engine with the given configuration.
+func New(socketPath string, outputPath string, collectionFreq time.Duration, oneShot bool) *Engine {
+	config := dcgm.Config{
 		SocketPath:                socketPath,
-		InitializationGracePeriod: DefaultInitializationGracePeriod,
+		InitializationGracePeriod: dcgm.DefaultInitializationGracePeriod,
 	}
 
 	return &Engine{
-		client:         NewClient(config),
+		client:         dcgm.NewClient(config),
 		outputPath:     outputPath,
 		collectionFreq: collectionFreq,
 		oneShot:        oneShot,

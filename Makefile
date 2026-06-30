@@ -199,7 +199,7 @@ build-dcgm-init:
 
 test-dcgm-init:
 	cd dcgm-init && CGO_ENABLED=1 CGO_LDFLAGS="-Wl,--unresolved-symbols=ignore-in-object-files" \
-		go test -mod=vendor -v -count=1 -timeout=60s ./...
+		go test -mod=vendor -tags unit -v -count=1 -timeout=60s ./...
 
 test-silent: test-ebs-csi
 	cd agent && GO111MODULE=on ${GOTEST} -tags unit -mod vendor \
