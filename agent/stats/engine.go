@@ -493,16 +493,9 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 
 	// Read GPU metrics once per tick before building container metrics.
 	// Both instance-level and container-level emission share this single read.
-	engine.gpuMetricsPublishCount++
-	engine.currentGPUMetrics = nil
-	if engine.gpuMetricsPublishCount >= 3 {
-		engine.gpuMetricsPublishCount = 0
-		gpuResult := engine.dcgmHandler.GetGPUMetrics()
-		if gpuResult != nil && len(gpuResult.Metrics) > 0 && gpuResult.Timestamp > engine.lastGPUTimestamp {
-			engine.lastGPUTimestamp = gpuResult.Timestamp
-			engine.currentGPUMetrics = gpuResult.Metrics
-		}
-	}
+	// refreshGPUMetrics updates engine.currentGPUMetrics under engine.lock so the
+	// subsequent (also locked) reads in taskContainerMetricsUnsafe see a consistent value.
+	engine.refreshGPUMetrics()
 
 	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
 	if metricsErr == nil {
@@ -512,13 +505,9 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 		}
 
 		// Attach instance-level GPU metrics if available.
-		if len(engine.currentGPUMetrics) > 0 {
-			usageTotal := engine.computeGPUUsageTotal()
-			instancePayload := gpu.GPUMetricsToInstancePayload(engine.currentGPUMetrics, usageTotal)
-			if instancePayload != nil {
-				metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
-					GeneralMetricsPayload: instancePayload,
-				}
+		if instancePayload := engine.instanceGPUPayload(); instancePayload != nil {
+			metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
+				GeneralMetricsPayload: instancePayload,
 			}
 		}
 
@@ -980,15 +969,12 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 		// Add GPU metrics for containers with assigned GPUs.
 		// Uses currentGPUMetrics which was read once during publishMetrics.
 		if len(engine.currentGPUMetrics) > 0 {
-			if task, taskErr := engine.resolver.ResolveTask(dockerID); taskErr == nil {
-				if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
-					gpuIDs := dockerContainer.Container.GPUIDs
-					if len(gpuIDs) > 0 {
-						gpuPayload := gpu.GPUMetricsForContainer(engine.currentGPUMetrics, gpuIDs)
-						if len(gpuPayload) > 0 {
-							containerMetric.GeneralMetricsPayload = gpuPayload
-						}
-						_ = task // suppress unused warning
+			if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
+				gpuIDs := dockerContainer.Container.GPUIDs
+				if len(gpuIDs) > 0 {
+					gpuPayload := gpu.GPUMetricsForContainer(engine.currentGPUMetrics, gpuIDs)
+					if len(gpuPayload) > 0 {
+						containerMetric.GeneralMetricsPayload = gpuPayload
 					}
 				}
 			}
@@ -999,9 +985,47 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 	return containerMetrics, nil
 }
 
-// computeGPUUsageTotal counts the total number of unique GPU device IDs assigned
-// to running task containers on this instance.
-func (engine *DockerStatsEngine) computeGPUUsageTotal() int64 {
+// refreshGPUMetrics advances the publish-cadence counter and, every 3rd tick
+// (~60s at the 20s publish interval), reads the latest GPU metrics from the shared
+// file written by dcgm-init. The result is stored in engine.currentGPUMetrics for
+// this tick's instance- and container-level emission. All access to the GPU fields
+// (gpuMetricsPublishCount, lastGPUTimestamp, currentGPUMetrics) is done under
+// engine.lock so the locked readers in GetInstanceMetrics/taskContainerMetricsUnsafe
+// observe a consistent value and concurrent publishMetrics goroutines do not race.
+func (engine *DockerStatsEngine) refreshGPUMetrics() {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	engine.gpuMetricsPublishCount++
+	engine.currentGPUMetrics = nil
+	if engine.gpuMetricsPublishCount >= 3 {
+		engine.gpuMetricsPublishCount = 0
+		gpuResult := engine.dcgmHandler.GetGPUMetrics()
+		if gpuResult != nil && len(gpuResult.Metrics) > 0 && gpuResult.Timestamp > engine.lastGPUTimestamp {
+			engine.lastGPUTimestamp = gpuResult.Timestamp
+			engine.currentGPUMetrics = gpuResult.Metrics
+		}
+	}
+}
+
+// instanceGPUPayload returns the instance-level GPU telemetry payload for the
+// current tick, or nil if there are no GPU metrics to report. It reads
+// engine.currentGPUMetrics and engine.tasksToContainers under engine.lock.
+func (engine *DockerStatsEngine) instanceGPUPayload() []*ecstcs.GeneralMetricsWrapper {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	if len(engine.currentGPUMetrics) == 0 {
+		return nil
+	}
+	usageTotal := engine.computeGPUUsageTotalUnsafe()
+	return gpu.GPUMetricsToInstancePayload(engine.currentGPUMetrics, usageTotal)
+}
+
+// computeGPUUsageTotalUnsafe counts the total number of unique GPU device IDs assigned
+// to running task containers on this instance. Callers must hold engine.lock because
+// it iterates engine.tasksToContainers.
+func (engine *DockerStatsEngine) computeGPUUsageTotalUnsafe() int64 {
 	gpuSet := make(map[string]struct{})
 	for taskArn := range engine.tasksToContainers {
 		task, err := engine.resolver.ResolveTaskByARN(taskArn)

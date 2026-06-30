@@ -74,7 +74,7 @@ func (ghc *gpuHealthcheck) RunCheck() ecstcs.InstanceHealthCheckStatus {
 func (ghc *gpuHealthcheck) SetHealthcheckStatus(healthStatus ecstcs.InstanceHealthCheckStatus) {
 	ghc.lock.Lock()
 	defer ghc.lock.Unlock()
-	nowTime := time.Now()
+	nowTime := timeNow()
 	if ghc.Status != healthStatus {
 		ghc.StatusChangeTime = nowTime
 	}
