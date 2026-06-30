@@ -16,11 +16,10 @@
 package gpu
 
 import (
-	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
-	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 )
 
-type GPUMetric = types.GPUMetric
+type GPUMetric = gputypes.GPUMetric
 
 type GPUMetricsResult struct {
 	Timestamp string
@@ -32,11 +31,3 @@ type DCGMHandler struct{}
 func NewDCGMHandler(_ string) *DCGMHandler { return &DCGMHandler{} }
 
 func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult { return nil }
-
-func GPUMetricsToInstancePayload(_ []GPUMetric, _ int64) []*ecstcs.GeneralMetricsWrapper {
-	return nil
-}
-
-func GPUMetricsForContainer(_ []GPUMetric, _ []string) []*ecstcs.GeneralMetricsWrapper {
-	return nil
-}

@@ -16,9 +16,13 @@
 package gpu
 
 import (
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
+
+// GPUMetric is the shared per-device GPU telemetry type from ecs-agent/gpu/types.
+type GPUMetric = gputypes.GPUMetric
 
 // GPU metric names as they appear in the TACS GeneralMetric payload.
 const (

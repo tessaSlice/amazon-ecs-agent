@@ -38,12 +38,13 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/csiclient"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/eventstream"
-	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
+	gpuconvert "github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/stats"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 
@@ -972,7 +973,7 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 			if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
 				gpuIDs := dockerContainer.Container.GPUIDs
 				if len(gpuIDs) > 0 {
-					gpuPayload := gpu.GPUMetricsForContainer(engine.currentGPUMetrics, gpuIDs)
+					gpuPayload := gpuconvert.GPUMetricsForContainer(engine.currentGPUMetrics, gpuIDs)
 					if len(gpuPayload) > 0 {
 						containerMetric.GeneralMetricsPayload = gpuPayload
 					}
@@ -1019,7 +1020,7 @@ func (engine *DockerStatsEngine) instanceGPUPayload() []*ecstcs.GeneralMetricsWr
 		return nil
 	}
 	usageTotal := engine.computeGPUUsageTotalUnsafe()
-	return gpu.GPUMetricsToInstancePayload(engine.currentGPUMetrics, usageTotal)
+	return gpuconvert.GPUMetricsToInstancePayload(engine.currentGPUMetrics, usageTotal)
 }
 
 // computeGPUUsageTotalUnsafe counts the total number of unique GPU device IDs assigned

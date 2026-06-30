@@ -16,27 +16,21 @@
 package gpu
 
 import (
-	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 )
 
-type GPUMetric = types.GPUMetric
+// GPUMetric is the shared per-device GPU telemetry type from ecs-agent/gpu/types.
+type GPUMetric = gputypes.GPUMetric
 
-type GPUMetricsResult struct {
-	Timestamp string
-	Metrics   []GPUMetric
-}
-
-type DCGMHandler struct{}
-
-func NewDCGMHandler(_ string) *DCGMHandler { return &DCGMHandler{} }
-
-func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult { return nil }
-
+// GPUMetricsToInstancePayload is a no-op on non-linux platforms, where GPU
+// metrics are not collected.
 func GPUMetricsToInstancePayload(_ []GPUMetric, _ int64) []*ecstcs.GeneralMetricsWrapper {
 	return nil
 }
 
+// GPUMetricsForContainer is a no-op on non-linux platforms, where GPU metrics
+// are not collected.
 func GPUMetricsForContainer(_ []GPUMetric, _ []string) []*ecstcs.GeneralMetricsWrapper {
 	return nil
 }
