@@ -18,8 +18,8 @@ package app
 
 import (
 	dockerdoctor "github.com/aws/amazon-ecs-agent/agent/doctor"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/doctor"
-	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
 )
 
 // appendGPUHealthcheck adds the ACCELERATED_COMPUTE healthcheck to the list when
