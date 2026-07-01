@@ -162,6 +162,7 @@ var (
 	dockerClient                  *client
 	dockerClientErr               error
 	isPathValid                   = defaultIsPathValid
+	mkdirAll                      = os.MkdirAll
 	execCommand                   = exec.Command
 	execLookPath                  = exec.LookPath
 	checkNvidiaGPUDevicesPresence = nvidiaGPUDevicesPresent
@@ -486,6 +487,15 @@ func (c *client) getHostConfig(envVarsFromFiles map[string]string) *godocker.Hos
 			if nvidiaGPUDevicesPresent() {
 				// bind mount gpu info dir
 				binds = append(binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
+				// Create and bind mount gpu metrics directory (written by dcgm-init, read by ecs-agent).
+				gpuMetricsDir := "/var/run/ecs"
+				if err := mkdirAll(gpuMetricsDir, 0755); err != nil {
+					// Skip the bind mount rather than mounting a non-existent directory,
+					// which would cause Docker to fail container start with a cryptic error.
+					log.Errorf("Failed to create GPU metrics directory %s, skipping bind mount: %v", gpuMetricsDir, err)
+				} else {
+					binds = append(binds, gpuMetricsDir+":"+gpuMetricsDir+readOnly)
+				}
 			}
 		}
 

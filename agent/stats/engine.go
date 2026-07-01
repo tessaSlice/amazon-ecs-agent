@@ -38,11 +38,13 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/csiclient"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/eventstream"
+	gpuconvert "github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/stats"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 
@@ -115,6 +117,16 @@ type DockerStatsEngine struct {
 
 	csiClient  csiclient.CSIClient
 	dataClient data.Client
+
+	// dcgmHandler reads GPU metrics from the shared file written by dcgm-init.
+	dcgmHandler *gpu.DCGMHandler
+	// gpuMetricsPublishCount tracks ticks to emit GPU metrics every 60s (3 ticks at 20s).
+	gpuMetricsPublishCount int
+	// lastGPUTimestamp tracks the last timestamp emitted to TACS to prevent emitting stale data.
+	lastGPUTimestamp string
+	// currentGPUMetrics holds the GPU metrics for the current publish tick,
+	// read once and shared between instance-level and container-level emission.
+	currentGPUMetrics []gpu.GPUMetric
 }
 
 // ResolveTask resolves the api task object, given container id.
@@ -172,6 +184,7 @@ func NewDockerStatsEngine(cfg *config.Config, client dockerapi.DockerClient, con
 		metricsChannel:                      metricsChannel,
 		healthChannel:                       healthChannel,
 		dataClient:                          dataClient,
+		dcgmHandler:                         gpu.NewDCGMHandler(""),
 	}
 }
 
@@ -478,12 +491,27 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool) {
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
+
+	// Read GPU metrics once per tick before building container metrics.
+	// Both instance-level and container-level emission share this single read.
+	// refreshGPUMetrics updates engine.currentGPUMetrics under engine.lock so the
+	// subsequent (also locked) reads in taskContainerMetricsUnsafe see a consistent value.
+	engine.refreshGPUMetrics()
+
 	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
 	if metricsErr == nil {
 		metricsMessage := ecstcs.TelemetryMessage{
 			Metadata:    metricsMetadata,
 			TaskMetrics: taskMetrics,
 		}
+
+		// Attach instance-level GPU metrics if available.
+		if instancePayload := engine.instanceGPUPayload(); instancePayload != nil {
+			metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
+				GeneralMetricsPayload: instancePayload,
+			}
+		}
+
 		select {
 		case engine.metricsChannel <- metricsMessage:
 			seelog.Debugf("sent telemetry message")
@@ -939,9 +967,79 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 				}
 			}
 		}
+		// Add GPU metrics for containers with assigned GPUs.
+		// Uses currentGPUMetrics which was read once during publishMetrics.
+		if len(engine.currentGPUMetrics) > 0 {
+			if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
+				gpuIDs := dockerContainer.Container.GPUIDs
+				if len(gpuIDs) > 0 {
+					gpuPayload := gpuconvert.GPUMetricsForContainer(engine.currentGPUMetrics, gpuIDs)
+					if len(gpuPayload) > 0 {
+						containerMetric.GeneralMetricsPayload = gpuPayload
+					}
+				}
+			}
+		}
+
 		containerMetrics = append(containerMetrics, containerMetric)
 	}
 	return containerMetrics, nil
+}
+
+// refreshGPUMetrics advances the publish-cadence counter and, every 3rd tick
+// (~60s at the 20s publish interval), reads the latest GPU metrics from the shared
+// file written by dcgm-init. The result is stored in engine.currentGPUMetrics for
+// this tick's instance- and container-level emission. All access to the GPU fields
+// (gpuMetricsPublishCount, lastGPUTimestamp, currentGPUMetrics) is done under
+// engine.lock so the locked readers in GetInstanceMetrics/taskContainerMetricsUnsafe
+// observe a consistent value and concurrent publishMetrics goroutines do not race.
+func (engine *DockerStatsEngine) refreshGPUMetrics() {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	engine.gpuMetricsPublishCount++
+	engine.currentGPUMetrics = nil
+	if engine.gpuMetricsPublishCount >= 3 {
+		engine.gpuMetricsPublishCount = 0
+		gpuResult := engine.dcgmHandler.GetGPUMetrics()
+		if gpuResult != nil && len(gpuResult.Metrics) > 0 && gpuResult.Timestamp > engine.lastGPUTimestamp {
+			engine.lastGPUTimestamp = gpuResult.Timestamp
+			engine.currentGPUMetrics = gpuResult.Metrics
+		}
+	}
+}
+
+// instanceGPUPayload returns the instance-level GPU telemetry payload for the
+// current tick, or nil if there are no GPU metrics to report. It reads
+// engine.currentGPUMetrics and engine.tasksToContainers under engine.lock.
+func (engine *DockerStatsEngine) instanceGPUPayload() []*ecstcs.GeneralMetricsWrapper {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	if len(engine.currentGPUMetrics) == 0 {
+		return nil
+	}
+	usageTotal := engine.computeGPUUsageTotalUnsafe()
+	return gpuconvert.GPUMetricsToInstancePayload(engine.currentGPUMetrics, usageTotal)
+}
+
+// computeGPUUsageTotalUnsafe counts the total number of unique GPU device IDs assigned
+// to running task containers on this instance. Callers must hold engine.lock because
+// it iterates engine.tasksToContainers.
+func (engine *DockerStatsEngine) computeGPUUsageTotalUnsafe() int64 {
+	gpuSet := make(map[string]struct{})
+	for taskArn := range engine.tasksToContainers {
+		task, err := engine.resolver.ResolveTaskByARN(taskArn)
+		if err != nil {
+			continue
+		}
+		for _, container := range task.Containers {
+			for _, gpuID := range container.GPUIDs {
+				gpuSet[gpuID] = struct{}{}
+			}
+		}
+	}
+	return int64(len(gpuSet))
 }
 
 func (engine *DockerStatsEngine) doRemoveContainerUnsafe(container *StatsContainer, taskArn string) {
