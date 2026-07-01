@@ -1,4 +1,4 @@
-// Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,7 +15,7 @@ package version
 
 import "fmt"
 
-// String constructs the version info of dcgm-init
+// String construct the version info of dcgm-init
 func String() string {
 	dirtyMark := ""
 	// Note that GitDirty is defined via command-line linker flags, so
@@ -26,7 +26,7 @@ func String() string {
 	return fmt.Sprintf("dcgm-init version %s (%s%s)", Version, dirtyMark, GitShortHash)
 }
 
-// PrintVersion prints out the dcgm-init version info
+// PrintVersion print out the
 func PrintVersion() error {
 	if Version == "" || GitShortHash == "" {
 		return fmt.Errorf("Version info not set")

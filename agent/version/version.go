@@ -24,4 +24,4 @@ const Version = "1.104.0"
 const GitDirty = true
 
 // GitShortHash is the short hash of this ecs-agent build
-const GitShortHash = "5c531fe3"
+const GitShortHash = "4640f4bb"
