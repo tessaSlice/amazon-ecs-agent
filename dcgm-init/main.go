@@ -16,6 +16,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -34,6 +35,7 @@ const (
 func main() {
 	socketPath := flag.String("socket-path", dcgm.DefaultSocketPath, "Path to the DCGM nv-hostengine Unix domain socket")
 	outputPath := flag.String("output", engine.DefaultOutputPath, "Path to write GPU metrics JSON output")
+	pidPath := flag.String("pidfile", engine.DefaultPidFilePath, "Path to the pid file used to locate the running process on stop")
 	collectionFreq := flag.Duration("interval", engine.DefaultCollectionFreq, "Metrics collection interval")
 	oneShot := flag.Bool("once", false, "Collect metrics once and exit")
 	flag.Parse()
@@ -49,7 +51,7 @@ func main() {
 
 	logger.Info("dcgm-init invoked", logger.Fields{"command": args[0]})
 
-	eng := engine.New(*socketPath, *outputPath, *collectionFreq, *oneShot)
+	eng := engine.New(*socketPath, *outputPath, *pidPath, *collectionFreq, *oneShot)
 	actions := actions(eng)
 
 	action, ok := actions[args[0]]
@@ -62,8 +64,21 @@ func main() {
 	}
 
 	if err := action.function(); err != nil {
-		die(err)
+		die(err, exitCodeFor(err))
 	}
+}
+
+// exitCodeFor maps an action error to a process exit code. A *engine.TerminalError
+// (an unrecoverable failure) maps to engine.TerminalFailureExitCode so the
+// systemd unit's RestartPreventExitStatus=5 stops it from restart-looping;
+// everything else maps to engine.DefaultErrorExitCode, which Restart=on-failure
+// will retry.
+func exitCodeFor(err error) int {
+	var terminalErr *engine.TerminalError
+	if errors.As(err, &terminalErr) {
+		return engine.TerminalFailureExitCode
+	}
+	return engine.DefaultErrorExitCode
 }
 
 type action struct {
@@ -94,8 +109,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "\n")
 }
 
-func die(err error) {
-	logger.Error("dcgm-init failed", logger.Fields{"error": err})
+func die(err error, exitCode int) {
+	logger.Error("dcgm-init failed", logger.Fields{"error": err, "exitCode": exitCode})
 	seelog.Flush()
-	os.Exit(1)
+	os.Exit(exitCode)
 }
