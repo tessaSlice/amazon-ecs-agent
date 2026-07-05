@@ -48,6 +48,15 @@ const (
 // gpuDeviceDimensionKey is the dimension key used to identify accelerated devices.
 const gpuDeviceDimensionKey = "AcceleratedDevice"
 
+// Dimension keys used to scope instance-level GPU metrics to a specific container
+// instance / EC2 instance in CloudWatch. Without these, InstanceGPULimit and
+// InstanceGPUUsageTotal collapse to the ClusterName dimension only and cannot be
+// broken down per instance.
+const (
+	instanceContainerInstanceDimensionKey = "ContainerInstanceId"
+	instanceEC2InstanceDimensionKey       = "EC2InstanceId"
+)
+
 // gpuMetricToGeneralMetricsWrapper converts a single GPUMetric to a GeneralMetricsWrapper.
 // Only non-nil metric fields are included. Returns nil if all metric fields are nil.
 func GPUMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper {
@@ -124,15 +133,35 @@ func GPUMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper
 // GeneralMetricsWrapper entries containing InstanceGPULimit and InstanceGPUUsageTotal.
 // The usageTotal parameter is the pre-computed count of unique GPU device IDs assigned
 // to running task containers. Returns nil if the input slice is empty.
-func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
+//
+// containerInstanceID and ec2InstanceID scope the metrics to this instance in
+// CloudWatch: when provided, they are attached as ContainerInstanceId / EC2InstanceId
+// dimensions so InstanceGPULimit and InstanceGPUUsageTotal can be broken down per
+// instance instead of only rolling up at the cluster level. Empty values are omitted.
+func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64, containerInstanceID, ec2InstanceID string) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 {
 		return nil
 	}
 
 	limitCount := int64(len(metrics))
 
+	var dimensions []*ecstcs.Dimension
+	if containerInstanceID != "" {
+		dimensions = append(dimensions, &ecstcs.Dimension{
+			Key:   aws.String(instanceContainerInstanceDimensionKey),
+			Value: aws.String(containerInstanceID),
+		})
+	}
+	if ec2InstanceID != "" {
+		dimensions = append(dimensions, &ecstcs.Dimension{
+			Key:   aws.String(instanceEC2InstanceDimensionKey),
+			Value: aws.String(ec2InstanceID),
+		})
+	}
+
 	return []*ecstcs.GeneralMetricsWrapper{
 		{
+			Dimensions: dimensions,
 			GeneralMetrics: []*ecstcs.GeneralMetric{
 				{
 					MetricName:      aws.String(gpuMetricNameInstanceGPULimitCount),

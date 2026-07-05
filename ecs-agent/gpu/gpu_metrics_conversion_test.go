@@ -189,12 +189,17 @@ func TestGpuMetricsToInstancePayload(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name          string
-		metrics       []GPUMetric
-		usageTotal    int64
-		expectNil     bool
-		expectedLimit int64
-		expectedUsage int64
+		name                string
+		metrics             []GPUMetric
+		usageTotal          int64
+		containerInstanceID string
+		ec2InstanceID       string
+		expectNil           bool
+		expectedLimit       int64
+		expectedUsage       int64
+		// expectedDimensions maps dimension key -> value that must be present on
+		// the emitted wrapper. Empty map means no dimensions expected.
+		expectedDimensions map[string]string
 	}{
 		{
 			name:      "empty slice returns nil",
@@ -263,13 +268,44 @@ func TestGpuMetricsToInstancePayload(t *testing.T) {
 			expectedLimit: 8,
 			expectedUsage: 5,
 		},
+		{
+			name: "instance dimensions attached when both IDs provided",
+			metrics: []GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+			},
+			usageTotal:          1,
+			containerInstanceID: "ci-abc123",
+			ec2InstanceID:       "i-0123456789abcdef0",
+			expectNil:           false,
+			expectedLimit:       1,
+			expectedUsage:       1,
+			expectedDimensions: map[string]string{
+				"ContainerInstanceId": "ci-abc123",
+				"EC2InstanceId":       "i-0123456789abcdef0",
+			},
+		},
+		{
+			name: "only container instance dimension when ec2 id empty",
+			metrics: []GPUMetric{
+				{GPUUUID: "GPU-1"},
+			},
+			usageTotal:          0,
+			containerInstanceID: "ci-abc123",
+			ec2InstanceID:       "",
+			expectNil:           false,
+			expectedLimit:       1,
+			expectedUsage:       0,
+			expectedDimensions: map[string]string{
+				"ContainerInstanceId": "ci-abc123",
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := GPUMetricsToInstancePayload(tc.metrics, tc.usageTotal)
+			result := GPUMetricsToInstancePayload(tc.metrics, tc.usageTotal, tc.containerInstanceID, tc.ec2InstanceID)
 
 			if tc.expectNil {
 				assert.Nil(t, result, "Expected nil payload for empty input.")
@@ -281,6 +317,18 @@ func TestGpuMetricsToInstancePayload(t *testing.T) {
 
 			wrapper := result[0]
 			require.Len(t, wrapper.GeneralMetrics, 2, "Expected two instance-level metrics.")
+
+			// Verify instance-scoping dimensions.
+			gotDimensions := make(map[string]string, len(wrapper.Dimensions))
+			for _, d := range wrapper.Dimensions {
+				require.NotNil(t, d.Key)
+				require.NotNil(t, d.Value)
+				gotDimensions[*d.Key] = *d.Value
+			}
+			assert.Len(t, wrapper.Dimensions, len(tc.expectedDimensions), "Unexpected number of dimensions.")
+			for k, v := range tc.expectedDimensions {
+				assert.Equal(t, v, gotDimensions[k], "Dimension %q mismatch.", k)
+			}
 
 			// Find metrics by name.
 			var limitMetric, usageMetric *struct {
@@ -525,7 +573,7 @@ func TestExtractInstanceGPUPayloadValues(t *testing.T) {
 
 			var payload []*ecstcs.GeneralMetricsWrapper
 			if tc.buildPayload {
-				payload = GPUMetricsToInstancePayload(tc.metrics, tc.usageTotal)
+				payload = GPUMetricsToInstancePayload(tc.metrics, tc.usageTotal, "", "")
 				require.NotNil(t, payload)
 			} else {
 				payload = tc.rawPayload
