@@ -560,7 +560,7 @@ func (agent *ecsAgent) doStart(containerChangeEventStream *eventstream.EventStre
 	taskHandler := eventhandler.NewTaskHandler(agent.ctx, agent.dataClient, state, client)
 	attachmentEventHandler := eventhandler.NewAttachmentEventHandler(agent.ctx, agent.dataClient, client)
 	agent.startAsyncRoutines(containerChangeEventStream, credentialsManager, imageManager,
-		taskEngine, deregisterInstanceEventStream, client, taskHandler, attachmentEventHandler, state, doctor)
+		taskEngine, deregisterInstanceEventStream, client, taskHandler, attachmentEventHandler, state, doctor, currentEC2InstanceID)
 	// TODO add EBS watcher to async routines
 	agent.startEBSWatcher(state, taskEngine, agent.dockerClient)
 	// Start the acs session, which should block doStart
@@ -974,6 +974,7 @@ func (agent *ecsAgent) startAsyncRoutines(
 	attachmentEventHandler *eventhandler.AttachmentEventHandler,
 	state dockerstate.TaskEngineState,
 	doctor *doctor.Doctor,
+	ec2InstanceID string,
 ) {
 
 	// Start of the periodic image cleanup process
@@ -1015,6 +1016,9 @@ func (agent *ecsAgent) startAsyncRoutines(
 		seelog.Warnf("Error initializing metrics engine: %v", err)
 		return
 	}
+	// Provide the EC2 instance ID so instance-level GPU metrics can be dimensioned
+	// per instance (ContainerInstanceId/EC2InstanceId) in CloudWatch.
+	statsEngine.SetEC2InstanceID(ec2InstanceID)
 	go statsEngine.StartMetricsPublish()
 
 	session, err := reporter.NewDockerTelemetrySession(agent.containerInstanceARN, agent.credentialsCache, agent.cfg, deregisterInstanceEventStream,

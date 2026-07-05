@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,6 +98,10 @@ type DockerStatsEngine struct {
 	client                     dockerapi.DockerClient
 	cluster                    string
 	containerInstanceArn       string
+	// ec2InstanceID is the EC2 instance ID of this host, used to scope
+	// instance-level GPU metrics to a specific instance in CloudWatch. It is set
+	// via SetEC2InstanceID after MustInit and may be empty (e.g. non-EC2 hosts).
+	ec2InstanceID              string
 	lock                       sync.RWMutex
 	config                     *config.Config
 	containerChangeEventStream *eventstream.EventStream
@@ -280,6 +285,16 @@ func (engine *DockerStatsEngine) MustInit(ctx context.Context, taskEngine ecseng
 
 	go engine.waitToStop()
 	return nil
+}
+
+// SetEC2InstanceID records the EC2 instance ID for this host so that instance-level
+// GPU metrics can be dimensioned per instance in CloudWatch. Safe to call with an
+// empty string (dimension is then omitted). Guarded by engine.lock because the
+// value is read from the publishMetrics goroutine.
+func (engine *DockerStatsEngine) SetEC2InstanceID(ec2InstanceID string) {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+	engine.ec2InstanceID = ec2InstanceID
 }
 
 // Shutdown cleans up the resources after the stats engine.
@@ -492,13 +507,21 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
 
-	// Read GPU metrics once per tick before building container metrics.
-	// Both instance-level and container-level emission share this single read.
-	// refreshGPUMetrics updates engine.currentGPUMetrics under engine.lock so the
-	// subsequent (also locked) reads in taskContainerMetricsUnsafe see a consistent value.
-	engine.refreshGPUMetrics()
+	// Read GPU metrics once per tick and snapshot them into a local. Both the
+	// container-level emission (inside GetInstanceMetrics) and the instance-level
+	// emission below use this single snapshot, so they stay consistent even if a
+	// concurrent publishMetrics goroutine refreshes engine.currentGPUMetrics in
+	// between. (Re-reading engine.currentGPUMetrics under a separate lock could
+	// let a concurrent tick nil it after the container path already used it,
+	// producing container-but-not-instance GPU metrics.)
+	gpuMetrics := engine.refreshGPUMetrics()
+	seelog.Infof("[GPU-DEBUG] after refreshGPUMetrics: snapshotLen=%d publishCount=%d lastGPUTimestamp=%q",
+		len(gpuMetrics), engine.gpuMetricsPublishCount, engine.lastGPUTimestamp)
 
 	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
+	if metricsErr != nil {
+		seelog.Infof("[GPU-DEBUG] GetInstanceMetrics returned err=%v (whole telemetry message, incl. instance GPU metrics, is skipped)", metricsErr)
+	}
 	if metricsErr == nil {
 		metricsMessage := ecstcs.TelemetryMessage{
 			Metadata:    metricsMetadata,
@@ -506,17 +529,21 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 		}
 
 		// Attach instance-level GPU metrics if available.
-		if instancePayload := engine.instanceGPUPayload(); instancePayload != nil {
+		instancePayload := engine.instanceGPUPayload(gpuMetrics)
+		seelog.Infof("[GPU-DEBUG] instanceGPUPayload: nil=%t payloadLen=%d snapshotLen=%d taskMetricsLen=%d",
+			instancePayload == nil, len(instancePayload), len(gpuMetrics), len(taskMetrics))
+		if instancePayload != nil {
 			metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
 				GeneralMetricsPayload: instancePayload,
 			}
+			seelog.Infof("[GPU-DEBUG] attached InstanceMetrics to telemetry message (wrappers=%d)", len(instancePayload))
 		}
 
 		select {
 		case engine.metricsChannel <- metricsMessage:
-			seelog.Debugf("sent telemetry message")
+			seelog.Infof("[GPU-DEBUG] sent telemetry message: hasInstanceMetrics=%t", metricsMessage.InstanceMetrics != nil)
 		case <-publishMetricsCtx.Done():
-			seelog.Errorf("timeout sending telemetry message, discarding metrics")
+			seelog.Errorf("[GPU-DEBUG] timeout sending telemetry message, discarding metrics (hasInstanceMetrics=%t)", metricsMessage.InstanceMetrics != nil)
 		}
 	} else {
 		seelog.Warnf("Error collecting task metrics: %v", metricsErr)
@@ -988,12 +1015,15 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 
 // refreshGPUMetrics advances the publish-cadence counter and, every 3rd tick
 // (~60s at the 20s publish interval), reads the latest GPU metrics from the shared
-// file written by dcgm-init. The result is stored in engine.currentGPUMetrics for
-// this tick's instance- and container-level emission. All access to the GPU fields
-// (gpuMetricsPublishCount, lastGPUTimestamp, currentGPUMetrics) is done under
-// engine.lock so the locked readers in GetInstanceMetrics/taskContainerMetricsUnsafe
-// observe a consistent value and concurrent publishMetrics goroutines do not race.
-func (engine *DockerStatsEngine) refreshGPUMetrics() {
+// file written by dcgm-init. It stores the result in engine.currentGPUMetrics
+// (read by taskContainerMetricsUnsafe under the GetInstanceMetrics lock) AND
+// returns the same slice so publishMetrics can hand a stable snapshot to the
+// instance-level emission. Returning the snapshot avoids re-reading the shared
+// field under a separate lock, where a concurrent publishMetrics goroutine could
+// nil it in between and drop instance metrics while container metrics survive.
+// All access to the GPU fields (gpuMetricsPublishCount, lastGPUTimestamp,
+// currentGPUMetrics) is done under engine.lock.
+func (engine *DockerStatsEngine) refreshGPUMetrics() []gpu.GPUMetric {
 	engine.lock.Lock()
 	defer engine.lock.Unlock()
 
@@ -1007,20 +1037,35 @@ func (engine *DockerStatsEngine) refreshGPUMetrics() {
 			engine.currentGPUMetrics = gpuResult.Metrics
 		}
 	}
+	return engine.currentGPUMetrics
 }
 
 // instanceGPUPayload returns the instance-level GPU telemetry payload for the
-// current tick, or nil if there are no GPU metrics to report. It reads
-// engine.currentGPUMetrics and engine.tasksToContainers under engine.lock.
-func (engine *DockerStatsEngine) instanceGPUPayload() []*ecstcs.GeneralMetricsWrapper {
+// given per-tick GPU metrics snapshot, or nil if there are none. It reads
+// engine.tasksToContainers under engine.lock but uses the caller-provided
+// snapshot for the GPU metrics so it stays consistent with the container-level
+// emission from the same tick.
+func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gpu.GPUMetric) []*ecstcs.GeneralMetricsWrapper {
+	if len(gpuMetrics) == 0 {
+		return nil
+	}
 	engine.lock.Lock()
 	defer engine.lock.Unlock()
 
-	if len(engine.currentGPUMetrics) == 0 {
-		return nil
-	}
 	usageTotal := engine.computeGPUUsageTotalUnsafe()
-	return gpuconvert.GPUMetricsToInstancePayload(engine.currentGPUMetrics, usageTotal)
+	containerInstanceID := arnToContainerInstanceID(engine.containerInstanceArn)
+	return gpuconvert.GPUMetricsToInstancePayload(gpuMetrics, usageTotal, containerInstanceID, engine.ec2InstanceID)
+}
+
+// arnToContainerInstanceID extracts the container instance ID (the resource ID after
+// the final "/") from a container instance ARN. CloudWatch dimensions the
+// ContainerInsights Instance record on this short ID, not the full ARN. Returns the
+// input unchanged if it is not in ARN form.
+func arnToContainerInstanceID(containerInstanceArn string) string {
+	if idx := strings.LastIndex(containerInstanceArn, "/"); idx >= 0 {
+		return containerInstanceArn[idx+1:]
+	}
+	return containerInstanceArn
 }
 
 // computeGPUUsageTotalUnsafe counts the total number of unique GPU device IDs assigned
