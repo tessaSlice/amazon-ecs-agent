@@ -419,15 +419,19 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	stagingPath := e.outputPath + ".staging"
-	if err := os.WriteFile(stagingPath, data, outputFilePermission); err != nil {
-		return fmt.Errorf("failed to write metrics to %s: %w", stagingPath, err)
+	// Write to a temporary file and then atomically rename it onto the final
+	// path so a concurrent reader (the agent) never observes a partially written
+	// file. The reader always consumes e.outputPath; e.outputPath+".tmp" is only
+	// the transient write target that the rename moves into place.
+	tmpPath := e.outputPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, outputFilePermission); err != nil {
+		return fmt.Errorf("failed to write metrics to %s: %w", tmpPath, err)
 	}
-	if err := os.Rename(stagingPath, e.outputPath); err != nil {
+	if err := os.Rename(tmpPath, e.outputPath); err != nil {
 		// Best-effort cleanup so a failed rename does not leave an orphaned
-		// staging file behind on every collection tick.
-		os.Remove(stagingPath)
-		return fmt.Errorf("failed to rename %s to %s: %w", stagingPath, e.outputPath, err)
+		// temp file behind on every collection tick.
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, e.outputPath, err)
 	}
 
 	logger.Info("metrics written", logger.Fields{"path": e.outputPath, "gpuCount": len(output.GPUs)})

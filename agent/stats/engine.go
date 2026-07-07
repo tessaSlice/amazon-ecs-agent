@@ -523,7 +523,14 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 	// GetInstanceMetrics returns could observe that nil, dropping instance
 	// metrics while container metrics (read earlier) survive.
 	gpuMetrics := engine.currentGPUMetrics
+	lastGPUTimestamp := engine.lastGPUTimestamp
 	engine.lock.Unlock()
+
+	// Trace the instance-level GPU read outcome so field debugging can tell
+	// whether this tick fetched fresh metrics from dcgm-init, was throttled by
+	// the 3-tick gate, or was dropped by the staleness guard.
+	seelog.Infof("GPU instance metrics read: gpuCount=%d, lastGPUTimestamp=%q",
+		len(gpuMetrics), lastGPUTimestamp)
 
 	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
 	if metricsErr == nil {
@@ -538,6 +545,9 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 			metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
 				GeneralMetricsPayload: instancePayload,
 			}
+			seelog.Infof("Attached instance-level GPU metrics to telemetry message: wrapperCount=%d", len(instancePayload))
+		} else {
+			seelog.Infof("No instance-level GPU metrics attached this tick (gpuCount=%d)", len(gpuMetrics))
 		}
 
 		select {
@@ -1043,6 +1053,13 @@ func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gpu.GPUMetric) 
 
 	usageTotal := engine.computeGPUUsageTotalUnsafe()
 	containerInstanceID := arnToContainerInstanceID(engine.containerInstanceArn)
+	// Log the dimensions stamped onto the instance-level payload. These
+	// (ContainerInstanceId/EC2InstanceId) determine which CloudWatch metric
+	// stream the values land in; empty values are dropped by the conversion
+	// layer, so surfacing them here makes a missing-dimension misconfiguration
+	// visible in the agent log.
+	seelog.Infof("Building instance GPU payload: gpuCount=%d, usageTotal=%d, containerInstanceId=%q, ec2InstanceId=%q",
+		len(gpuMetrics), usageTotal, containerInstanceID, engine.ec2InstanceID)
 	return gpuconvert.GPUMetricsToInstancePayload(gpuMetrics, usageTotal, containerInstanceID, engine.ec2InstanceID)
 }
 

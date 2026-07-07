@@ -501,9 +501,9 @@ func TestCollectAndWriteAtomicRename(t *testing.T) {
 	_, err = os.Stat(outputPath)
 	assert.NoError(t, err, "Output file should exist after collectAndWrite")
 
-	// Staging file should NOT exist (renamed away)
-	_, err = os.Stat(outputPath + ".staging")
-	assert.True(t, os.IsNotExist(err), "Staging file should not exist after rename")
+	// Temp file should NOT exist (renamed away)
+	_, err = os.Stat(outputPath + ".tmp")
+	assert.True(t, os.IsNotExist(err), "Temp file should not exist after rename")
 }
 
 func TestCollectAndWriteReportsHealthyStatus(t *testing.T) {
