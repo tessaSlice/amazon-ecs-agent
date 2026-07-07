@@ -501,7 +501,13 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 	// snapshotGPUMetrics guards the shared GPU fields with a deferred unlock so
 	// the lock is released even if the collector call panics, and returns a
 	// stable per-tick snapshot for the instance-level emission below.
-	gpuMetrics := engine.snapshotGPUMetrics()
+	gpuMetrics, lastGPUTimestamp := engine.snapshotGPUMetrics()
+
+	// Trace the instance-level GPU read outcome so field debugging can tell
+	// whether this tick fetched fresh metrics from dcgm-init, was throttled by
+	// the 3-tick gate, or was dropped by the staleness guard.
+	seelog.Infof("GPU instance metrics read: gpuCount=%d, lastGPUTimestamp=%q",
+		len(gpuMetrics), lastGPUTimestamp)
 
 	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
 	if metricsErr == nil {
@@ -516,6 +522,9 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 			metricsMessage.InstanceMetrics = &ecstcs.InstanceMetrics{
 				GeneralMetricsPayload: instancePayload,
 			}
+			seelog.Infof("Attached instance-level GPU metrics to telemetry message: wrapperCount=%d", len(instancePayload))
+		} else {
+			seelog.Infof("No instance-level GPU metrics attached this tick (gpuCount=%d)", len(gpuMetrics))
 		}
 
 		select {
@@ -1011,7 +1020,7 @@ func (engine *DockerStatsEngine) SetEC2InstanceID(ec2InstanceID string) {
 // every 3 ticks (~60s), updating the shared engine.currentGPUMetrics/
 // lastGPUTimestamp fields. The lock is released via defer so it is freed even if
 // engine.dcgmHandler.GetGPUMetrics() panics.
-func (engine *DockerStatsEngine) snapshotGPUMetrics() []gpu.GPUMetric {
+func (engine *DockerStatsEngine) snapshotGPUMetrics() ([]gpu.GPUMetric, string) {
 	engine.lock.Lock()
 	defer engine.lock.Unlock()
 
@@ -1025,7 +1034,7 @@ func (engine *DockerStatsEngine) snapshotGPUMetrics() []gpu.GPUMetric {
 			engine.currentGPUMetrics = gpuResult.Metrics
 		}
 	}
-	return engine.currentGPUMetrics
+	return engine.currentGPUMetrics, engine.lastGPUTimestamp
 }
 
 // instanceGPUPayload returns the instance-level GPU telemetry payload built from
@@ -1043,6 +1052,13 @@ func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gpu.GPUMetric) 
 
 	usageTotal := engine.computeGPUUsageTotalUnsafe()
 	containerInstanceID := arnToContainerInstanceID(engine.containerInstanceArn)
+	// Log the dimensions stamped onto the instance-level payload. These
+	// (ContainerInstanceId/EC2InstanceId) determine which CloudWatch metric
+	// stream the values land in; empty values are dropped by the conversion
+	// layer, so surfacing them here makes a missing-dimension misconfiguration
+	// visible in the agent log.
+	seelog.Infof("Building instance GPU payload: gpuCount=%d, usageTotal=%d, containerInstanceId=%q, ec2InstanceId=%q",
+		len(gpuMetrics), usageTotal, containerInstanceID, engine.ec2InstanceID)
 	return gpuconvert.GPUMetricsToInstancePayload(gpuMetrics, usageTotal, containerInstanceID, engine.ec2InstanceID)
 }
 
