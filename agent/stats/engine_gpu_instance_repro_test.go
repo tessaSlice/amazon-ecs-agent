@@ -4,7 +4,7 @@
 // publishMetrics tick that nils engine.currentGPUMetrics between the container
 // read and the instance read. Guards against reintroducing the split-lock drop
 // where instanceGPUPayload re-read the shared field instead of using the
-// per-tick snapshot returned by refreshGPUMetrics.
+// per-tick snapshot captured in publishMetrics.
 
 package stats
 
@@ -21,17 +21,21 @@ import (
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	mock_resolver "github.com/aws/amazon-ecs-agent/agent/stats/resolver/mock"
 )
 
-// Reproduces the v2 split-lock bug: instanceGPUPayload used to RE-READ
-// engine.currentGPUMetrics under a separate lock after GetInstanceMetrics
-// returned. A concurrent tick's refreshGPUMetrics nils the field in that gap,
-// dropping instance metrics while container metrics (read earlier) survive.
+// Reproduces the split-lock drop: instanceGPUPayload must build from the
+// per-tick snapshot captured while holding engine.lock in publishMetrics, NOT
+// re-read engine.currentGPUMetrics. A concurrent publishMetrics tick nils
+// engine.currentGPUMetrics on entry; if the instance path re-read that shared
+// field it would observe nil and drop instance metrics while container metrics
+// (read earlier in the same tick) survive.
 //
-// With the snapshot fix, instanceGPUPayload uses the value returned by
-// refreshGPUMetrics, so it cannot be nilled by a concurrent tick.
+// This test drives the same read sequence publishMetrics uses: capture the
+// snapshot after the guarded 3rd-tick read, simulate a concurrent tick nilling
+// the shared field, then confirm the snapshot still yields an instance payload.
 func TestInstanceGPUPayloadSurvivesConcurrentNil(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
@@ -73,17 +77,26 @@ func TestInstanceGPUPayloadSurvivesConcurrentNil(t *testing.T) {
 		}
 	}
 
-	// Snapshot for this tick (3rd tick triggers a populated snapshot).
-	engine.gpuMetricsPublishCount = 2
-	gpuMetrics := engine.refreshGPUMetrics()
-	assert.NotEmpty(t, gpuMetrics, "3rd-tick refresh should return a populated snapshot")
-
-	// Simulate a CONCURRENT publishMetrics tick that nils the shared field
-	// AFTER the snapshot was taken (this is the window that dropped instance
-	// metrics before the fix).
+	// Drive the 3rd-tick guarded read exactly as publishMetrics does, then
+	// capture the per-tick snapshot while holding the lock.
+	engine.lock.Lock()
+	engine.gpuMetricsPublishCount = 3
 	engine.gpuMetricsPublishCount = 0
-	engine.refreshGPUMetrics() // nils engine.currentGPUMetrics (non-3rd tick)
-	assert.Empty(t, engine.currentGPUMetrics, "concurrent tick should have nilled the shared field")
+	if gpuResult := engine.dcgmHandler.GetGPUMetrics(); gpuResult != nil && len(gpuResult.Metrics) > 0 && gpuResult.Timestamp > engine.lastGPUTimestamp {
+		engine.lastGPUTimestamp = gpuResult.Timestamp
+		engine.currentGPUMetrics = gpuResult.Metrics
+	}
+	gpuMetrics := engine.currentGPUMetrics
+	engine.lock.Unlock()
+	require.NotEmpty(t, gpuMetrics, "3rd-tick read should populate the per-tick snapshot")
+
+	// Simulate a CONCURRENT publishMetrics tick that nils the shared field AFTER
+	// the snapshot was taken (this is the window that dropped instance metrics
+	// before the fix). This is exactly what refreshing on a non-3rd tick does.
+	engine.lock.Lock()
+	engine.currentGPUMetrics = nil
+	engine.lock.Unlock()
+	require.Empty(t, engine.currentGPUMetrics, "concurrent tick should have nilled the shared field")
 
 	// The instance payload must still be built from the snapshot, not the field.
 	instancePayload := engine.instanceGPUPayload(gpuMetrics)
