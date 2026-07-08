@@ -18,7 +18,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -140,22 +139,11 @@ func TestRunReconcileFailureReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "initial DCGM reconciliation failed")
 }
 
-// TestTerminalErrorUnwraps verifies *TerminalError wraps its cause so
-// errors.As/errors.Is can classify it (the basis for the exit-5 mapping).
-func TestTerminalErrorUnwraps(t *testing.T) {
-	cause := assert.AnError
-	var te error = NewTerminalError(cause)
-
-	var got *TerminalError
-	assert.True(t, errors.As(te, &got), "errors.As should recognize *TerminalError")
-	assert.ErrorIs(t, te, cause, "TerminalError should unwrap to its cause")
-	assert.Equal(t, cause.Error(), te.Error(), "Error() should surface the cause message")
-}
-
-// TestStartUnwritableOutputDirReturnsTerminalError verifies that a bad output
-// path (a config problem a restart cannot fix) is reported as a *TerminalError,
-// so main() maps it to TerminalFailureExitCode and systemd will not restart-loop.
-func TestStartUnwritableOutputDirReturnsTerminalError(t *testing.T) {
+// TestStartUnusableOutputDirReturnsErrOutputDirUnusable verifies that a bad
+// output path (a config problem a restart cannot fix) is reported wrapping
+// ErrOutputDirUnusable, so main() maps it to RestartPreventExitCode and systemd
+// will not restart-loop.
+func TestStartUnusableOutputDirReturnsErrOutputDirUnusable(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -166,16 +154,14 @@ func TestStartUnwritableOutputDirReturnsTerminalError(t *testing.T) {
 	outputPath := filepath.Join(notADir, "sub", "gpu-metrics.json")
 
 	mockClient := mock_dcgm.NewMockClient(ctrl)
-	// Shutdown runs via the deferred cleanup even on the early terminal return.
+	// Shutdown runs via the deferred cleanup even on the early return.
 	mockClient.EXPECT().Shutdown().Return(nil).AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
 	err := eng.Start()
 	require.Error(t, err, "Start() should fail when the output directory cannot be created")
-
-	var te *TerminalError
-	assert.True(t, errors.As(err, &te), "output-dir failure should be a *TerminalError")
+	assert.ErrorIs(t, err, ErrOutputDirUnusable, "output-dir failure should wrap ErrOutputDirUnusable")
 }
 
 // TestStartCancelsRunLoopOnSIGTERM verifies the shutdown mechanism the systemd

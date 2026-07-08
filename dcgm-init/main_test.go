@@ -29,16 +29,16 @@ func TestExitCodeFor(t *testing.T) {
 	assert.Equal(t, engine.DefaultErrorExitCode, exitCodeFor(errors.New("boom")),
 		"a generic error should map to the default (retryable) exit code")
 
-	// A TerminalError maps to the terminal code, which RestartPreventExitStatus=5 blocks.
-	terminal := engine.NewTerminalError(errors.New("bad output path"))
-	assert.Equal(t, engine.TerminalFailureExitCode, exitCodeFor(terminal),
-		"a *TerminalError should map to the terminal exit code")
+	// ErrOutputDirUnusable maps to the restart-prevent code, which
+	// RestartPreventExitStatus=5 blocks.
+	assert.Equal(t, engine.RestartPreventExitCode, exitCodeFor(engine.ErrOutputDirUnusable),
+		"ErrOutputDirUnusable should map to the restart-prevent exit code")
 
-	// A TerminalError wrapped by fmt.Errorf(%w) must still be detected via errors.As.
-	wrapped := fmt.Errorf("startup failed: %w", terminal)
-	assert.Equal(t, engine.TerminalFailureExitCode, exitCodeFor(wrapped),
-		"a wrapped *TerminalError should still map to the terminal exit code")
+	// The sentinel wrapped by fmt.Errorf(%w) must still be detected via errors.Is.
+	wrapped := fmt.Errorf("startup failed: %w", engine.ErrOutputDirUnusable)
+	assert.Equal(t, engine.RestartPreventExitCode, exitCodeFor(wrapped),
+		"a wrapped ErrOutputDirUnusable should still map to the restart-prevent exit code")
 
-	// The terminal and default codes must be distinct, or the distinction is meaningless.
-	assert.NotEqual(t, engine.TerminalFailureExitCode, engine.DefaultErrorExitCode)
+	// The restart-prevent and default codes must be distinct, or the distinction is meaningless.
+	assert.NotEqual(t, engine.RestartPreventExitCode, engine.DefaultErrorExitCode)
 }

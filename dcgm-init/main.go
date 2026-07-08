@@ -79,15 +79,14 @@ func main() {
 	}
 }
 
-// exitCodeFor maps an action error to a process exit code. A *engine.TerminalError
-// (an unrecoverable failure) maps to engine.TerminalFailureExitCode so the
-// systemd unit's RestartPreventExitStatus=5 stops it from restart-looping;
-// everything else maps to engine.DefaultErrorExitCode, which Restart=on-failure
-// will retry.
+// exitCodeFor maps an action error to a process exit code. An unrecoverable
+// failure (errors.Is engine.ErrOutputDirUnusable) maps to
+// engine.RestartPreventExitCode so the systemd unit's RestartPreventExitStatus=5
+// stops it from restart-looping; everything else maps to
+// engine.DefaultErrorExitCode, which Restart=on-failure will retry.
 func exitCodeFor(err error) int {
-	var terminalErr *engine.TerminalError
-	if errors.As(err, &terminalErr) {
-		return engine.TerminalFailureExitCode
+	if errors.Is(err, engine.ErrOutputDirUnusable) {
+		return engine.RestartPreventExitCode
 	}
 	return engine.DefaultErrorExitCode
 }

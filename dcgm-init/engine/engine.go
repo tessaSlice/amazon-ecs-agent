@@ -18,6 +18,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -51,43 +52,26 @@ const (
 	unixWOK = 0x2
 )
 
-// Exit codes for the dcgm-init binary. They mirror ecs-init's convention so the
-// dcgm-init systemd unit's RestartPreventExitStatus=5 can distinguish an
-// unrecoverable (terminal) failure — which a restart cannot fix — from a
-// transient failure that systemd should retry.
+// Exit codes for the dcgm-init binary. They let the dcgm-init systemd unit's
+// RestartPreventExitStatus=5 distinguish an unrecoverable failure — which a
+// restart cannot fix — from a transient failure that systemd should retry.
 const (
-	// TerminalFailureExitCode signals an unrecoverable failure. Because the unit
+	// RestartPreventExitCode signals an unrecoverable failure. Because the unit
 	// sets RestartPreventExitStatus=5, exiting with this code prevents systemd
 	// from restarting dcgm-init in a hot loop over a problem a restart won't fix.
-	TerminalFailureExitCode = 5
+	RestartPreventExitCode = 5
 
 	// DefaultErrorExitCode signals a transient/generic failure. With
 	// Restart=on-failure, systemd will restart the service after RestartSec.
 	DefaultErrorExitCode = 1
 )
 
-// TerminalError marks a failure that a restart cannot fix (e.g. a bad output
-// path). main() maps it to TerminalFailureExitCode. It mirrors
-// ecs-init/engine.TerminalError.
-type TerminalError struct {
-	err error
-}
-
-func (e *TerminalError) Error() string {
-	if e.err == nil {
-		return "terminal error"
-	}
-	return e.err.Error()
-}
-
-// Unwrap lets errors.As/errors.Is see the wrapped cause.
-func (e *TerminalError) Unwrap() error { return e.err }
-
-// NewTerminalError wraps err as a *TerminalError, marking it unrecoverable so
-// main() exits with TerminalFailureExitCode.
-func NewTerminalError(err error) *TerminalError {
-	return &TerminalError{err: err}
-}
+// ErrOutputDirUnusable is returned (wrapped) when the metrics output directory
+// cannot be used — it does not exist and cannot be created, or it exists but is
+// not a writable directory. It is a configuration problem a restart cannot fix,
+// so main() maps it to RestartPreventExitCode. Callers wrap it with fmt.Errorf
+// %w and detect it with errors.Is.
+var ErrOutputDirUnusable = errors.New("dcgm-init output directory is unusable")
 
 // Engine drives the dcgm-init metrics collection loop: it connects to DCGM via
 // the dcgm.Client, periodically collects GPU metrics, and writes them to a shared
@@ -172,28 +156,28 @@ func (e *Engine) Start() error {
 // check; MkdirAll is only a fallback for when it is genuinely absent (e.g. the
 // tmpfs entry was not recreated). A path that exists but is not a writable
 // directory is a configuration problem a restart cannot fix, so it is returned
-// as a *TerminalError to stop systemd restart-looping.
+// wrapping ErrOutputDirUnusable to stop systemd restart-looping.
 func (e *Engine) ensureOutputDir() error {
 	outputDir := filepath.Dir(e.outputPath)
 
 	info, statErr := os.Stat(outputDir)
 	if statErr == nil {
 		if !info.IsDir() {
-			return NewTerminalError(fmt.Errorf("output path %s exists but is not a directory", outputDir))
+			return fmt.Errorf("output path %s exists but is not a directory: %w", outputDir, ErrOutputDirUnusable)
 		}
 		// Directory exists — confirm we can write into it rather than assuming.
 		if accessErr := syscall.Access(outputDir, unixWOK); accessErr != nil {
-			return NewTerminalError(fmt.Errorf("output directory %s is not writable: %w", outputDir, accessErr))
+			return fmt.Errorf("output directory %s is not writable: %v: %w", outputDir, accessErr, ErrOutputDirUnusable)
 		}
 		return nil
 	}
 	if !os.IsNotExist(statErr) {
-		return NewTerminalError(fmt.Errorf("failed to stat output directory %s: %w", outputDir, statErr))
+		return fmt.Errorf("failed to stat output directory %s: %v: %w", outputDir, statErr, ErrOutputDirUnusable)
 	}
 
 	// Directory does not exist — create it as a fallback.
 	if err := os.MkdirAll(outputDir, outputDirPermission); err != nil {
-		return NewTerminalError(fmt.Errorf("failed to create output directory %s: %w", outputDir, err))
+		return fmt.Errorf("failed to create output directory %s: %v: %w", outputDir, err, ErrOutputDirUnusable)
 	}
 	return nil
 }
