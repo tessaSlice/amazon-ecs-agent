@@ -23,7 +23,6 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
 	"github.com/aws/amazon-ecs-agent/dcgm-init/version"
-	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 	"github.com/cihub/seelog"
 )
@@ -34,10 +33,6 @@ const (
 )
 
 func main() {
-	socketPath := flag.String("socket-path", dcgm.DefaultSocketPath, "Path to the DCGM nv-hostengine Unix domain socket")
-	outputPath := flag.String("output", engine.DefaultOutputPath, "Path to write GPU metrics JSON output")
-	collectionFreq := flag.Duration("interval", engine.DefaultCollectionFreq, "Metrics collection interval")
-	oneShot := flag.Bool("once", false, "Collect metrics once and exit")
 	flag.Parse()
 
 	args := flag.Args()
@@ -62,7 +57,7 @@ func main() {
 		return
 	}
 
-	eng := engine.New(*socketPath, *outputPath, *collectionFreq, *oneShot)
+	eng := engine.New()
 	actions := actions(eng)
 
 	action, ok := actions[args[0]]
@@ -106,7 +101,7 @@ func actions(eng *engine.Engine) map[string]action {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [flags] COMMAND\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s COMMAND\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, " Available commands:\n")
 	for cmd, a := range actions(nil) {

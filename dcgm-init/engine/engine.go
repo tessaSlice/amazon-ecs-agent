@@ -32,14 +32,12 @@ import (
 )
 
 const (
-	// DefaultOutputPath is the shared file where dcgm-init writes GPU metrics
-	// for the agent to consume. It must match the path the agent reads from.
-	DefaultOutputPath = "/var/run/ecs/gpu-metrics.json"
+	// outputPath is the shared file where dcgm-init writes GPU metrics for the
+	// agent to consume. It must match the path the agent reads from.
+	outputPath = "/var/run/ecs/gpu-metrics.json"
 
-	// DefaultCollectionFreq is the default interval between metrics collections.
-	// It is also used as a fallback when a non-positive interval is configured,
-	// since time.NewTicker panics on a non-positive duration.
-	DefaultCollectionFreq = 60 * time.Second
+	// collectionFreq is the interval between metrics collections.
+	collectionFreq = 60 * time.Second
 
 	// outputDirPermission is the permission for the directory holding the metrics file.
 	outputDirPermission = 0755
@@ -74,48 +72,34 @@ const (
 // site supplies its own descriptive prefix), so the message is kept terse.
 var ErrOutputDirUnusable = errors.New("output directory unusable")
 
-// Filesystem operations used by ensureOutputDir, indirected through package
-// vars so tests can deterministically exercise each branch (a real MkdirAll
-// failure, for example, is permission-dependent and would not reproduce under
-// root). Production code uses the real os/syscall implementations.
+// Filesystem operations used by ensureOutputDir and collectAndWrite, indirected
+// through package vars so tests can deterministically exercise each branch and
+// redirect I/O away from the fixed outputPath const (a real MkdirAll/write
+// failure is permission-dependent and would not reproduce under root). Production
+// code uses the real os/syscall implementations.
 var (
 	osStat      = os.Stat
 	osMkdirAll  = os.MkdirAll
 	checkAccess = syscall.Access
+	osWriteFile = os.WriteFile
+	osRename    = os.Rename
+	osRemove    = os.Remove
 )
 
 // Engine drives the dcgm-init metrics collection loop: it connects to DCGM via
 // the dcgm.Client, periodically collects GPU metrics, and writes them to a shared
-// JSON file that the agent reads.
+// JSON file that the agent reads. Its configuration (outputPath, collectionFreq)
+// is fixed at compile time via package constants rather than command-line flags.
 type Engine struct {
-	client         dcgm.Client
-	outputPath     string
-	collectionFreq time.Duration
-	oneShot        bool
+	client dcgm.Client
 }
 
-// New creates an Engine with the given configuration.
-func New(socketPath string, outputPath string, collectionFreq time.Duration, oneShot bool) *Engine {
-	config := dcgm.Config{
-		SocketPath:                socketPath,
-		InitializationGracePeriod: dcgm.DefaultInitializationGracePeriod,
-	}
-
-	// Guard against a non-positive interval: time.NewTicker panics on a
-	// duration <= 0, which would crash the long-running "start" command.
-	if collectionFreq <= 0 {
-		logger.Warn("dcgm-init collection interval is non-positive, using default", logger.Fields{
-			"configured": collectionFreq,
-			"default":    DefaultCollectionFreq,
-		})
-		collectionFreq = DefaultCollectionFreq
-	}
-
+// New creates an Engine backed by a DCGM client. An empty dcgm.Config is passed
+// so NewClient applies its own defaults (DefaultSocketPath,
+// DefaultInitializationGracePeriod) rather than restating them here.
+func New() *Engine {
 	return &Engine{
-		client:         dcgm.NewClient(config),
-		outputPath:     outputPath,
-		collectionFreq: collectionFreq,
-		oneShot:        oneShot,
+		client: dcgm.NewClient(dcgm.Config{}),
 	}
 }
 
@@ -169,7 +153,7 @@ func (e *Engine) Start() error {
 // directory is a configuration problem a restart cannot fix, so it is returned
 // wrapping ErrOutputDirUnusable to stop systemd restart-looping.
 func (e *Engine) ensureOutputDir() error {
-	outputDir := filepath.Dir(e.outputPath)
+	outputDir := filepath.Dir(outputPath)
 
 	info, statErr := osStat(outputDir)
 	if statErr == nil {
@@ -193,8 +177,7 @@ func (e *Engine) ensureOutputDir() error {
 	return nil
 }
 
-// run reconciles the DCGM connection, then collects and writes metrics. In
-// one-shot mode it collects once and returns; otherwise it collects on each
+// run reconciles the DCGM connection, then collects and writes metrics on each
 // tick of collectionFreq until the context is cancelled.
 func (e *Engine) run(ctx context.Context) error {
 	reinitialized, err := e.client.Reconcile(ctx)
@@ -203,11 +186,7 @@ func (e *Engine) run(ctx context.Context) error {
 	}
 	logger.Info("DCGM client reconciled", logger.Fields{"reinitialized": reinitialized})
 
-	if e.oneShot {
-		return e.collectAndWrite(ctx)
-	}
-
-	ticker := time.NewTicker(e.collectionFreq)
+	ticker := time.NewTicker(collectionFreq)
 	defer ticker.Stop()
 
 	// If a shutdown signal arrived during startup (e.g. while Reconcile was
@@ -288,19 +267,19 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 
 	// Write to a temporary file and then atomically rename it onto the final
 	// path so a concurrent reader (the agent) never observes a partially written
-	// file. The reader always consumes e.outputPath; e.outputPath+".tmp" is only
+	// file. The reader always consumes outputPath; outputPath+".tmp" is only
 	// the transient write target that the rename moves into place.
-	tmpPath := e.outputPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, outputFilePermission); err != nil {
+	tmpPath := outputPath + ".tmp"
+	if err := osWriteFile(tmpPath, data, outputFilePermission); err != nil {
 		return fmt.Errorf("failed to write metrics to %s: %w", tmpPath, err)
 	}
-	if err := os.Rename(tmpPath, e.outputPath); err != nil {
+	if err := osRename(tmpPath, outputPath); err != nil {
 		// Best-effort cleanup so a failed rename does not leave an orphaned
 		// temp file behind on every collection tick.
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, e.outputPath, err)
+		osRemove(tmpPath)
+		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, outputPath, err)
 	}
 
-	logger.Info("metrics written", logger.Fields{"path": e.outputPath, "gpuCount": len(output.GPUs)})
+	logger.Info("metrics written", logger.Fields{"path": outputPath, "gpuCount": len(output.GPUs)})
 	return nil
 }
