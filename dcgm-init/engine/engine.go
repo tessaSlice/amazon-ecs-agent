@@ -45,6 +45,10 @@ const (
 
 	// outputFilePermission is the permission for the metrics file (and its staging copy).
 	outputFilePermission = 0644
+
+	// unixWOK is the write-permission mode passed to syscall.Access to test
+	// whether the current process can write into the output directory (W_OK).
+	unixWOK = 0x2
 )
 
 // Exit codes for the dcgm-init binary. They mirror ecs-init's convention so the
@@ -154,14 +158,44 @@ func (e *Engine) Start() error {
 		}
 	}()
 
-	outputDir := filepath.Dir(e.outputPath)
-	if err := os.MkdirAll(outputDir, outputDirPermission); err != nil {
-		// A bad output path is a configuration problem a restart cannot fix;
-		// mark it terminal so systemd does not restart-loop over it.
-		return NewTerminalError(fmt.Errorf("failed to create output directory %s: %w", outputDir, err))
+	if err := e.ensureOutputDir(); err != nil {
+		return err
 	}
 
 	return e.run(ctx)
+}
+
+// ensureOutputDir makes sure the directory holding the metrics file exists and
+// is writable by this (dcgm-init, host-side) process before the collection loop
+// starts. The directory is normally pre-created by the ecs-init package install
+// / a systemd-tmpfiles rule, so the common path is just a stat + writability
+// check; MkdirAll is only a fallback for when it is genuinely absent (e.g. the
+// tmpfs entry was not recreated). A path that exists but is not a writable
+// directory is a configuration problem a restart cannot fix, so it is returned
+// as a *TerminalError to stop systemd restart-looping.
+func (e *Engine) ensureOutputDir() error {
+	outputDir := filepath.Dir(e.outputPath)
+
+	info, statErr := os.Stat(outputDir)
+	if statErr == nil {
+		if !info.IsDir() {
+			return NewTerminalError(fmt.Errorf("output path %s exists but is not a directory", outputDir))
+		}
+		// Directory exists — confirm we can write into it rather than assuming.
+		if accessErr := syscall.Access(outputDir, unixWOK); accessErr != nil {
+			return NewTerminalError(fmt.Errorf("output directory %s is not writable: %w", outputDir, accessErr))
+		}
+		return nil
+	}
+	if !os.IsNotExist(statErr) {
+		return NewTerminalError(fmt.Errorf("failed to stat output directory %s: %w", outputDir, statErr))
+	}
+
+	// Directory does not exist — create it as a fallback.
+	if err := os.MkdirAll(outputDir, outputDirPermission); err != nil {
+		return NewTerminalError(fmt.Errorf("failed to create output directory %s: %w", outputDir, err))
+	}
+	return nil
 }
 
 // run reconciles the DCGM connection, then collects and writes metrics. In

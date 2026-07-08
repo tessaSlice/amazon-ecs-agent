@@ -41,6 +41,10 @@ const (
 	// readOnly specifies the read-only suffix for mounting host volumes
 	// when creating the Agent container
 	readOnly = ":ro"
+	// gpuMetricsDir is the host directory that dcgm-init writes GPU metrics into
+	// and the Agent container reads them from. It is created by the ecs-init
+	// package install, so it always exists and can be bind-mounted directly.
+	gpuMetricsDir = "/var/run/ecs"
 	// hostProcDir binds the host's /proc directory to /host/proc within the
 	// ECS Agent container
 	// The ECS Agent needs access to host's /proc directory when configuring
@@ -162,7 +166,6 @@ var (
 	dockerClient                  *client
 	dockerClientErr               error
 	isPathValid                   = defaultIsPathValid
-	mkdirAll                      = os.MkdirAll
 	execCommand                   = exec.Command
 	execLookPath                  = exec.LookPath
 	checkNvidiaGPUDevicesPresence = nvidiaGPUDevicesPresent
@@ -487,15 +490,11 @@ func (c *client) getHostConfig(envVarsFromFiles map[string]string) *godocker.Hos
 			if nvidiaGPUDevicesPresent() {
 				// bind mount gpu info dir
 				binds = append(binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
-				// Create and bind mount gpu metrics directory (written by dcgm-init, read by ecs-agent).
-				gpuMetricsDir := "/var/run/ecs"
-				if err := mkdirAll(gpuMetricsDir, 0755); err != nil {
-					// Skip the bind mount rather than mounting a non-existent directory,
-					// which would cause Docker to fail container start with a cryptic error.
-					log.Errorf("Failed to create GPU metrics directory %s, skipping bind mount: %v", gpuMetricsDir, err)
-				} else {
-					binds = append(binds, gpuMetricsDir+":"+gpuMetricsDir+readOnly)
-				}
+				// Bind mount the gpu metrics directory (written by dcgm-init, read
+				// by ecs-agent). The directory is created by the ecs-init package
+				// install (see the ecs-agent.spec %install section), so ecs-init no
+				// longer needs to create it here.
+				binds = append(binds, gpuMetricsDir+":"+gpuMetricsDir+readOnly)
 			}
 		}
 
