@@ -53,11 +53,11 @@ func expectStatus(m *mock_dcgm.MockClient, healthy bool, reason string, connLost
 }
 
 // readOutput reads and unmarshals the metrics file written by the engine.
-func readOutput(t *testing.T, path string) metricsOutput {
+func readOutput(t *testing.T, path string) dcgmOutput {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	var out metricsOutput
+	var out dcgmOutput
 	require.NoError(t, json.Unmarshal(data, &out))
 	return out
 }
@@ -91,7 +91,7 @@ func TestCollectAndWrite(t *testing.T) {
 		name        string
 		setupMock   func(*mock_dcgm.MockClient)
 		wantWritten bool
-		verify      func(t *testing.T, out metricsOutput)
+		verify      func(t *testing.T, out dcgmOutput)
 	}{
 		{
 			name: "reconcile failure skips GetMetrics and writes nothing",
@@ -110,7 +110,7 @@ func TestCollectAndWrite(t *testing.T) {
 				expectStatus(m, true, "", true)
 			},
 			wantWritten: true,
-			verify: func(t *testing.T, out metricsOutput) {
+			verify: func(t *testing.T, out dcgmOutput) {
 				assert.NotEmpty(t, out.Timestamp, "status file should carry a fresh timestamp")
 				assert.True(t, out.ConnectionLost, "status file should reflect connection lost")
 				assert.Empty(t, out.GPUs, "no per-GPU metrics should be present on collection failure")
@@ -126,7 +126,7 @@ func TestCollectAndWrite(t *testing.T) {
 				expectStatus(m, true, "", false)
 			},
 			wantWritten: true,
-			verify: func(t *testing.T, out metricsOutput) {
+			verify: func(t *testing.T, out dcgmOutput) {
 				assert.True(t, out.Healthy)
 				assert.Empty(t, out.UnhealthyReason)
 				assert.False(t, out.ConnectionLost)
@@ -146,7 +146,7 @@ func TestCollectAndWrite(t *testing.T) {
 				expectStatus(m, false, "XID_48", false)
 			},
 			wantWritten: true,
-			verify: func(t *testing.T, out metricsOutput) {
+			verify: func(t *testing.T, out dcgmOutput) {
 				assert.False(t, out.Healthy, "unhealthy GPU should report healthy=false")
 				assert.Equal(t, "XID_48", out.UnhealthyReason, "should report the XID error code")
 			},

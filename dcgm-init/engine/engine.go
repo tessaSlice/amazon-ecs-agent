@@ -153,9 +153,9 @@ func (e *Engine) run(ctx context.Context) error {
 	}
 }
 
-// metricsOutput is the JSON structure written to the shared metrics file. Its
+// dcgmOutput is the JSON structure written to the shared metrics file. Its
 // shape and tags must match what the agent reads.
-type metricsOutput struct {
+type dcgmOutput struct {
 	Timestamp       string `json:"timestamp"`
 	Healthy         bool   `json:"healthy"`
 	UnhealthyReason string `json:"unhealthy_reason,omitempty"`
@@ -190,7 +190,7 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 		metrics = []gputypes.GPUMetric{}
 	}
 
-	output := metricsOutput{
+	output := dcgmOutput{
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 		Healthy:         e.client.IsHealthy(),
 		UnhealthyReason: e.client.UnhealthyReason(),
