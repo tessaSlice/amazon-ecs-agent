@@ -23,7 +23,6 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
 	"github.com/aws/amazon-ecs-agent/dcgm-init/version"
-	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 	"github.com/cihub/seelog"
 )
@@ -33,17 +32,25 @@ const (
 	VERSION = "version"
 )
 
+// Exit codes for the dcgm-init binary. None of them is 5: the systemd unit no
+// longer reserves an exit status to prevent restarts, so every failure is
+// retryable.
+const (
+	// ExitError signals a generic runtime failure.
+	ExitError = 1
+
+	// ExitSetupError signals a startup/configuration failure (e.g. creating the
+	// output directory or the initial DCGM reconciliation).
+	ExitSetupError = 2
+)
+
 func main() {
-	socketPath := flag.String("socket-path", dcgm.DefaultSocketPath, "Path to the DCGM nv-hostengine Unix domain socket")
-	outputPath := flag.String("output", engine.DefaultOutputPath, "Path to write GPU metrics JSON output")
-	collectionFreq := flag.Duration("interval", engine.DefaultCollectionFreq, "Metrics collection interval")
-	oneShot := flag.Bool("once", false, "Collect metrics once and exit")
 	flag.Parse()
 
 	args := flag.Args()
 	if len(args) == 0 {
 		usage()
-		os.Exit(1)
+		os.Exit(ExitError)
 	}
 
 	logger.InitSeelog()
@@ -57,12 +64,12 @@ func main() {
 		if err := version.PrintVersion(); err != nil {
 			logger.Error("failed to print version info", logger.Fields{"error": err})
 			seelog.Flush()
-			os.Exit(1)
+			os.Exit(ExitError)
 		}
 		return
 	}
 
-	eng := engine.New(*socketPath, *outputPath, *collectionFreq, *oneShot)
+	eng := engine.New()
 	actions := actions(eng)
 
 	action, ok := actions[args[0]]
@@ -71,7 +78,7 @@ func main() {
 		// Flush explicitly: os.Exit skips the deferred seelog.Flush(), which
 		// would otherwise drop the buffered "dcgm-init invoked" log above.
 		seelog.Flush()
-		os.Exit(1)
+		os.Exit(ExitError)
 	}
 
 	if err := action.function(); err != nil {
@@ -79,17 +86,14 @@ func main() {
 	}
 }
 
-// exitCodeFor maps an action error to a process exit code. A *engine.TerminalError
-// (an unrecoverable failure) maps to engine.TerminalFailureExitCode so the
-// systemd unit's RestartPreventExitStatus=5 stops it from restart-looping;
-// everything else maps to engine.DefaultErrorExitCode, which Restart=on-failure
-// will retry.
+// exitCodeFor maps an action error to a process exit code. A setup/configuration
+// failure (an error wrapping engine.ErrSetup) maps to ExitSetupError; every
+// other failure maps to the generic ExitError. Neither is 5.
 func exitCodeFor(err error) int {
-	var terminalErr *engine.TerminalError
-	if errors.As(err, &terminalErr) {
-		return engine.TerminalFailureExitCode
+	if errors.Is(err, engine.ErrSetup) {
+		return ExitSetupError
 	}
-	return engine.DefaultErrorExitCode
+	return ExitError
 }
 
 type action struct {
@@ -107,7 +111,7 @@ func actions(eng *engine.Engine) map[string]action {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [flags] COMMAND\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s COMMAND\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, " Available commands:\n")
 	for cmd, a := range actions(nil) {
