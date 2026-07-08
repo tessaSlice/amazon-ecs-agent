@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -58,8 +59,14 @@ const (
 // Engine drives the dcgm-init metrics collection loop: it connects to DCGM via
 // the dcgm.Client, periodically collects GPU metrics, and writes them to a
 // shared JSON file that the agent reads.
+//
+// outputPath and collectionInterval default to the package constants in New()
+// and are only overridden in tests, so they can redirect writes to a temp
+// directory and shrink the ticker without waiting a full production interval.
 type Engine struct {
-	client dcgm.Client
+	client             dcgm.Client
+	outputPath         string
+	collectionInterval time.Duration
 }
 
 // New creates an instance of Engine. The DCGM client is created here but does
@@ -67,8 +74,16 @@ type Engine struct {
 // cheap and does not fail on hosts where nv-hostengine is not yet up.
 func New() (*Engine, error) {
 	return &Engine{
-		client: dcgm.NewClient(dcgm.Config{}),
+		client:             dcgm.NewClient(dcgm.Config{}),
+		outputPath:         MetricsFilePath,
+		collectionInterval: metricsCollectionInterval,
 	}, nil
+}
+
+// tempPath is the staging file that collectAndWrite writes before atomically
+// renaming it onto outputPath.
+func (e *Engine) tempPath() string {
+	return e.outputPath + ".tmp"
 }
 
 // Start prepares the output location and then runs the metrics collection loop
@@ -77,8 +92,9 @@ func (e *Engine) Start() error {
 	// Ensure the output directory exists. MkdirAll is a no-op when the
 	// directory is already present; any other failure means we have nowhere to
 	// write metrics, so fail fast and let systemd surface the error.
-	if err := os.MkdirAll(MetricsDirectory, metricsDirPermission); err != nil {
-		return fmt.Errorf("failed to create metrics directory %s: %w", MetricsDirectory, err)
+	outputDir := filepath.Dir(e.outputPath)
+	if err := os.MkdirAll(outputDir, metricsDirPermission); err != nil {
+		return fmt.Errorf("failed to create metrics directory %s: %w", outputDir, err)
 	}
 
 	// Ensure the metrics file and its staging temp file exist so the agent,
@@ -87,11 +103,11 @@ func (e *Engine) Start() error {
 	// up to the grace period). ensureFile leaves an existing file untouched, so
 	// this is safe across restarts; only an inability to create the files is
 	// fatal.
-	if err := ensureFile(MetricsFilePath); err != nil {
-		return fmt.Errorf("failed to create metrics file %s: %w", MetricsFilePath, err)
+	if err := ensureFile(e.outputPath); err != nil {
+		return fmt.Errorf("failed to create metrics file %s: %w", e.outputPath, err)
 	}
-	if err := ensureFile(TempMetricsFilePath); err != nil {
-		return fmt.Errorf("failed to create temp metrics file %s: %w", TempMetricsFilePath, err)
+	if err := ensureFile(e.tempPath()); err != nil {
+		return fmt.Errorf("failed to create temp metrics file %s: %w", e.tempPath(), err)
 	}
 
 	// Cancel the context when a shutdown signal arrives so the run loop unwinds
@@ -115,7 +131,7 @@ func (e *Engine) Start() error {
 // run collects metrics immediately and then on every tick of
 // metricsCollectionInterval until the context is cancelled.
 func (e *Engine) run(ctx context.Context) error {
-	ticker := time.NewTicker(metricsCollectionInterval)
+	ticker := time.NewTicker(e.collectionInterval)
 	defer ticker.Stop()
 
 	// Collect once up front so the file is populated without waiting a full
@@ -188,16 +204,17 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 	}
 
 	// Write to the temp file and then atomically rename it onto the final path.
-	// The reader always consumes MetricsFilePath; TempMetricsFilePath is only
-	// the transient write target that the rename moves into place.
-	if err := os.WriteFile(TempMetricsFilePath, data, metricsFilePermission); err != nil {
-		return fmt.Errorf("failed to write metrics to %s: %w", TempMetricsFilePath, err)
+	// The reader always consumes outputPath; the temp file is only the transient
+	// write target that the rename moves into place.
+	tempPath := e.tempPath()
+	if err := os.WriteFile(tempPath, data, metricsFilePermission); err != nil {
+		return fmt.Errorf("failed to write metrics to %s: %w", tempPath, err)
 	}
-	if err := os.Rename(TempMetricsFilePath, MetricsFilePath); err != nil {
-		return fmt.Errorf("failed to rename %s to %s: %w", TempMetricsFilePath, MetricsFilePath, err)
+	if err := os.Rename(tempPath, e.outputPath); err != nil {
+		return fmt.Errorf("failed to rename %s to %s: %w", tempPath, e.outputPath, err)
 	}
 
-	logger.Debug("metrics written", logger.Fields{"path": MetricsFilePath, "gpuCount": len(output.GPUs)})
+	logger.Debug("metrics written", logger.Fields{"path": e.outputPath, "gpuCount": len(output.GPUs)})
 	return nil
 }
 
