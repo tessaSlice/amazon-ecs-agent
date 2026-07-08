@@ -21,9 +21,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -42,7 +39,6 @@ func newTestEngine(client dcgm.Client, outputPath string, collectionFreq time.Du
 		outputPath:     outputPath,
 		collectionFreq: collectionFreq,
 		oneShot:        oneShot,
-		signalProcess:  syscall.Kill,
 	}
 }
 
@@ -50,13 +46,13 @@ func TestNewClampsNonPositiveInterval(t *testing.T) {
 	// A non-positive interval would panic time.NewTicker; New() must clamp it
 	// to the default so the "start" command cannot be crashed by a bad flag.
 	for _, freq := range []time.Duration{0, -1 * time.Second} {
-		eng := New("", "/tmp/does-not-matter.json", "", freq, false)
+		eng := New("", "/tmp/does-not-matter.json", freq, false)
 		assert.Equal(t, DefaultCollectionFreq, eng.collectionFreq,
 			"non-positive interval %s should be clamped to the default", freq)
 	}
 
 	// A positive interval is preserved as-is.
-	eng := New("", "/tmp/does-not-matter.json", "", 5*time.Second, false)
+	eng := New("", "/tmp/does-not-matter.json", 5*time.Second, false)
 	assert.Equal(t, 5*time.Second, eng.collectionFreq)
 }
 
@@ -144,12 +140,6 @@ func TestRunReconcileFailureReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "initial DCGM reconciliation failed")
 }
 
-func TestStopReturnsNil(t *testing.T) {
-	eng := &Engine{}
-	err := eng.Stop()
-	assert.NoError(t, err, "Stop() should be a no-op and return nil when no run loop is active")
-}
-
 // TestTerminalErrorUnwraps verifies *TerminalError wraps its cause so
 // errors.As/errors.Is can classify it (the basis for the exit-5 mapping).
 func TestTerminalErrorUnwraps(t *testing.T) {
@@ -180,8 +170,6 @@ func TestStartUnwritableOutputDirReturnsTerminalError(t *testing.T) {
 	mockClient.EXPECT().Shutdown().Return(nil).AnyTimes()
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
-	// No pid path so the failure is specifically the output dir.
-	eng.pidPath = ""
 
 	err := eng.Start()
 	require.Error(t, err, "Start() should fail when the output directory cannot be created")
@@ -190,11 +178,11 @@ func TestStartUnwritableOutputDirReturnsTerminalError(t *testing.T) {
 	assert.True(t, errors.As(err, &te), "output-dir failure should be a *TerminalError")
 }
 
-// TestStopCancelsRunningStart verifies that, when Start() and Stop() run in the
-// same process, Stop() cancels the run() context and causes Start() to return.
-// (Under systemd, start/stop are separate processes and Stop() is a no-op; this
-// covers the in-process path.)
-func TestStopCancelsRunningStart(t *testing.T) {
+// TestStartCancelsRunLoopOnSIGTERM verifies the shutdown mechanism the systemd
+// unit relies on now that there is no "stop" command / ExecStop: sending SIGTERM
+// to the process cancels the run loop and Start() returns nil after shutting the
+// client down exactly once.
+func TestStartCancelsRunLoopOnSIGTERM(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -211,7 +199,7 @@ func TestStopCancelsRunningStart(t *testing.T) {
 	mockClient.EXPECT().IsConnectionLost().Return(false).AnyTimes()
 	mockClient.EXPECT().Shutdown().Return(nil).Times(1)
 
-	// Long interval so the loop stays blocked in select until Stop() cancels it.
+	// Long interval so the loop stays blocked in select until the signal fires.
 	eng := newTestEngine(mockClient, outputPath, time.Hour, false)
 
 	done := make(chan error, 1)
@@ -219,29 +207,22 @@ func TestStopCancelsRunningStart(t *testing.T) {
 		done <- eng.Start()
 	}()
 
-	// Wait until Start() has published its cancel func (run loop is active),
-	// then request stop.
+	// Wait until the run loop is active (the output file has been written once),
+	// then deliver SIGTERM to this process — Start()'s watcher should cancel the
+	// context and return.
 	require.Eventually(t, func() bool {
-		eng.mu.Lock()
-		defer eng.mu.Unlock()
-		return eng.cancel != nil
-	}, 2*time.Second, 5*time.Millisecond, "Start() should publish a cancel func")
+		_, err := os.Stat(outputPath)
+		return err == nil
+	}, 2*time.Second, 5*time.Millisecond, "Start() should begin collecting before shutdown")
 
-	assert.NoError(t, eng.Stop(), "Stop() should cancel the run loop and return nil")
+	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
 
 	select {
 	case err := <-done:
-		assert.NoError(t, err, "Start() should return nil after Stop() cancels the context")
+		assert.NoError(t, err, "Start() should return nil after SIGTERM cancels the run loop")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Start() did not return after Stop() was called")
+		t.Fatal("Start() did not return after SIGTERM was delivered")
 	}
-
-	// After Start() returns, cancel must be cleared so a later Stop() is a no-op.
-	eng.mu.Lock()
-	clearedCancel := eng.cancel
-	eng.mu.Unlock()
-	assert.Nil(t, clearedCancel, "cancel should be cleared after Start() returns")
-	assert.NoError(t, eng.Stop(), "Stop() after Start() returns should be a no-op")
 }
 
 // TestStartOneShotWritesFileAndShutsDown exercises Start() end-to-end in
@@ -268,8 +249,6 @@ func TestStartOneShotWritesFileAndShutsDown(t *testing.T) {
 	mockClient.EXPECT().Shutdown().Return(nil).Times(1)
 
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, true)
-	pidPath := filepath.Join(tmpDir, "dcgm-init.pid")
-	eng.pidPath = pidPath
 
 	err := eng.Start()
 	require.NoError(t, err, "Start() in one-shot mode should complete without error")
@@ -281,145 +260,6 @@ func TestStartOneShotWritesFileAndShutsDown(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &output))
 	require.Len(t, output.GPUs, 1)
 	assert.Equal(t, "GPU-start-001", output.GPUs[0].GPUUUID)
-
-	// The pid file must be cleaned up when Start() returns.
-	_, statErr := os.Stat(pidPath)
-	assert.True(t, os.IsNotExist(statErr), "pid file should be removed after Start() returns")
-}
-
-// TestStartWritesPidFileWithOwnPid verifies Start() records the current PID in
-// the configured pid file while the run loop is active.
-func TestStartWritesPidFileWithOwnPid(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	tmpDir := t.TempDir()
-	outputPath := filepath.Join(tmpDir, "gpu-metrics.json")
-	pidPath := filepath.Join(tmpDir, "dcgm-init.pid")
-
-	mockClient := mock_dcgm.NewMockClient(ctrl)
-	mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
-	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{}, nil).AnyTimes()
-	mockClient.EXPECT().IsHealthy().Return(true).AnyTimes()
-	mockClient.EXPECT().UnhealthyReason().Return("").AnyTimes()
-	mockClient.EXPECT().IsConnectionLost().Return(false).AnyTimes()
-	mockClient.EXPECT().Shutdown().Return(nil).Times(1)
-
-	eng := newTestEngine(mockClient, outputPath, time.Hour, false)
-	eng.pidPath = pidPath
-
-	done := make(chan error, 1)
-	go func() { done <- eng.Start() }()
-
-	// Once the run loop is active, the pid file should contain our PID.
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(pidPath)
-		if err != nil {
-			return false
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		return err == nil && pid == os.Getpid()
-	}, 2*time.Second, 5*time.Millisecond, "pid file should record the current PID")
-
-	require.NoError(t, eng.Stop(), "in-process Stop() should cancel the loop")
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Start() did not return after Stop()")
-	}
-}
-
-// TestStopSignalsProcessFromPidFile verifies the cross-process path: with no
-// in-process run loop, Stop() reads the pid file and signals that PID with
-// SIGTERM (the mechanism systemd/the CLI rely on to cancel the running loop).
-func TestStopSignalsProcessFromPidFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	pidPath := filepath.Join(tmpDir, "dcgm-init.pid")
-	require.NoError(t, os.WriteFile(pidPath, []byte("4242\n"), 0644))
-
-	var (
-		mu        sync.Mutex
-		gotPid    int
-		gotSig    syscall.Signal
-		signalled bool
-	)
-	eng := &Engine{
-		pidPath: pidPath,
-		signalProcess: func(pid int, sig syscall.Signal) error {
-			mu.Lock()
-			defer mu.Unlock()
-			gotPid, gotSig, signalled = pid, sig, true
-			return nil
-		},
-	}
-
-	require.NoError(t, eng.Stop())
-
-	mu.Lock()
-	defer mu.Unlock()
-	assert.True(t, signalled, "Stop() should signal the process recorded in the pid file")
-	assert.Equal(t, 4242, gotPid)
-	assert.Equal(t, syscall.SIGTERM, gotSig)
-}
-
-// TestStopNoPidFileIsNoop verifies Stop() treats a missing pid file as
-// "already stopped" and does not signal anything.
-func TestStopNoPidFileIsNoop(t *testing.T) {
-	tmpDir := t.TempDir()
-	pidPath := filepath.Join(tmpDir, "dcgm-init.pid") // never created
-
-	signalled := false
-	eng := &Engine{
-		pidPath: pidPath,
-		signalProcess: func(pid int, sig syscall.Signal) error {
-			signalled = true
-			return nil
-		},
-	}
-
-	assert.NoError(t, eng.Stop(), "Stop() with no pid file should be a no-op")
-	assert.False(t, signalled, "Stop() should not signal anything when no pid file exists")
-}
-
-// TestStopStalePidFileRemoved verifies that when the recorded process no longer
-// exists (signal returns ESRCH), Stop() cleans up the stale pid file and
-// reports success.
-func TestStopStalePidFileRemoved(t *testing.T) {
-	tmpDir := t.TempDir()
-	pidPath := filepath.Join(tmpDir, "dcgm-init.pid")
-	require.NoError(t, os.WriteFile(pidPath, []byte("999999\n"), 0644))
-
-	eng := &Engine{
-		pidPath: pidPath,
-		signalProcess: func(pid int, sig syscall.Signal) error {
-			return syscall.ESRCH // no such process
-		},
-	}
-
-	assert.NoError(t, eng.Stop(), "Stop() should treat a stale pid file as already stopped")
-	_, statErr := os.Stat(pidPath)
-	assert.True(t, os.IsNotExist(statErr), "stale pid file should be removed")
-}
-
-// TestStopMalformedPidFileErrors verifies a corrupt pid file surfaces an error
-// rather than silently signalling a bogus PID.
-func TestStopMalformedPidFileErrors(t *testing.T) {
-	tmpDir := t.TempDir()
-	pidPath := filepath.Join(tmpDir, "dcgm-init.pid")
-	require.NoError(t, os.WriteFile(pidPath, []byte("not-a-pid\n"), 0644))
-
-	signalled := false
-	eng := &Engine{
-		pidPath: pidPath,
-		signalProcess: func(pid int, sig syscall.Signal) error {
-			signalled = true
-			return nil
-		},
-	}
-
-	err := eng.Stop()
-	assert.Error(t, err, "Stop() should error on a malformed pid file")
-	assert.False(t, signalled, "Stop() should not signal on a malformed pid file")
 }
 
 func TestCollectAndWriteCreatesValidJSON(t *testing.T) {
