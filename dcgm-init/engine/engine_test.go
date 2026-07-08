@@ -140,14 +140,18 @@ func TestRunReconcileFailureReturnsError(t *testing.T) {
 }
 
 // TestStartUnusableOutputDirReturnsErrOutputDirUnusable verifies that a bad
-// output path (a config problem a restart cannot fix) is reported wrapping
-// ErrOutputDirUnusable, so main() maps it to RestartPreventExitCode and systemd
-// will not restart-loop.
+// output path (a config problem a restart cannot fix) surfaces through Start()
+// wrapping ErrOutputDirUnusable, so main() maps it to RestartPreventExitCode and
+// systemd will not restart-loop. It uses a real regular-file parent, which makes
+// os.Stat on the output dir return ENOTDIR — i.e. it exercises the stat-error
+// branch of ensureOutputDir. The other branches are covered directly by
+// TestEnsureOutputDir below.
 func TestStartUnusableOutputDirReturnsErrOutputDirUnusable(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	// Point the output under a regular file so MkdirAll cannot create the dir.
+	// Point the output dir under a regular file so os.Stat(outputDir) fails with
+	// ENOTDIR (not IsNotExist), hitting the stat-error branch.
 	tmpDir := t.TempDir()
 	notADir := filepath.Join(tmpDir, "iamafile")
 	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0644))
@@ -160,9 +164,101 @@ func TestStartUnusableOutputDirReturnsErrOutputDirUnusable(t *testing.T) {
 	eng := newTestEngine(mockClient, outputPath, 60*time.Second, false)
 
 	err := eng.Start()
-	require.Error(t, err, "Start() should fail when the output directory cannot be created")
+	require.Error(t, err, "Start() should fail when the output directory is unusable")
 	assert.ErrorIs(t, err, ErrOutputDirUnusable, "output-dir failure should wrap ErrOutputDirUnusable")
 }
+
+// TestEnsureOutputDir covers every branch of ensureOutputDir deterministically
+// by injecting the filesystem seams (osStat/checkAccess/osMkdirAll). Each
+// failure branch must wrap both ErrOutputDirUnusable (for the exit-code mapping)
+// and the underlying OS cause (so callers can errors.Is the specific reason).
+func TestEnsureOutputDir(t *testing.T) {
+	// Restore the real implementations after the test.
+	origStat, origAccess, origMkdir := osStat, checkAccess, osMkdirAll
+	defer func() { osStat, checkAccess, osMkdirAll = origStat, origAccess, origMkdir }()
+
+	dirInfo := func() os.FileInfo { fi, _ := os.Stat(t.TempDir()); return fi }()
+
+	tests := []struct {
+		name      string
+		stat      func(string) (os.FileInfo, error)
+		access    func(string, uint32) error
+		mkdir     func(string, os.FileMode) error
+		wantErr   bool
+		wantCause error // underlying OS cause that must remain in the chain, or nil
+	}{
+		{
+			name:   "existing writable dir succeeds",
+			stat:   func(string) (os.FileInfo, error) { return dirInfo, nil },
+			access: func(string, uint32) error { return nil },
+		},
+		{
+			name:      "path exists but is not a directory",
+			stat:      func(string) (os.FileInfo, error) { return fakeFileInfo{isDir: false}, nil },
+			wantErr:   true,
+			wantCause: nil, // no OS cause for this branch
+		},
+		{
+			name:      "existing dir not writable",
+			stat:      func(string) (os.FileInfo, error) { return dirInfo, nil },
+			access:    func(string, uint32) error { return syscall.EACCES },
+			wantErr:   true,
+			wantCause: syscall.EACCES,
+		},
+		{
+			name:      "stat fails with non-NotExist error",
+			stat:      func(string) (os.FileInfo, error) { return nil, syscall.EACCES },
+			wantErr:   true,
+			wantCause: syscall.EACCES,
+		},
+		{
+			name:      "dir absent and mkdir fails",
+			stat:      func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+			mkdir:     func(string, os.FileMode) error { return syscall.EACCES },
+			wantErr:   true,
+			wantCause: syscall.EACCES,
+		},
+		{
+			name:  "dir absent and mkdir succeeds",
+			stat:  func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+			mkdir: func(string, os.FileMode) error { return nil },
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			osStat = tc.stat
+			checkAccess = tc.access
+			osMkdirAll = tc.mkdir
+
+			eng := &Engine{outputPath: "/var/run/ecs/gpu-metrics.json"}
+			err := eng.ensureOutputDir()
+
+			if !tc.wantErr {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrOutputDirUnusable, "must wrap ErrOutputDirUnusable for the exit-code mapping")
+			if tc.wantCause != nil {
+				assert.ErrorIs(t, err, tc.wantCause, "must keep the underlying OS cause in the error chain")
+			}
+		})
+	}
+}
+
+// fakeFileInfo is a minimal os.FileInfo whose IsDir() is controllable, used to
+// exercise the "exists but not a directory" branch without touching the real FS.
+type fakeFileInfo struct {
+	isDir bool
+}
+
+func (f fakeFileInfo) Name() string       { return "fake" }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { return 0 }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.isDir }
+func (f fakeFileInfo) Sys() any           { return nil }
 
 // TestStartCancelsRunLoopOnSIGTERM verifies the shutdown mechanism the systemd
 // unit relies on now that there is no "stop" command / ExecStop: sending SIGTERM

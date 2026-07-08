@@ -70,8 +70,19 @@ const (
 // cannot be used — it does not exist and cannot be created, or it exists but is
 // not a writable directory. It is a configuration problem a restart cannot fix,
 // so main() maps it to RestartPreventExitCode. Callers wrap it with fmt.Errorf
-// %w and detect it with errors.Is.
-var ErrOutputDirUnusable = errors.New("dcgm-init output directory is unusable")
+// %w and detect it with errors.Is; it is never surfaced for its text (each call
+// site supplies its own descriptive prefix), so the message is kept terse.
+var ErrOutputDirUnusable = errors.New("output directory unusable")
+
+// Filesystem operations used by ensureOutputDir, indirected through package
+// vars so tests can deterministically exercise each branch (a real MkdirAll
+// failure, for example, is permission-dependent and would not reproduce under
+// root). Production code uses the real os/syscall implementations.
+var (
+	osStat      = os.Stat
+	osMkdirAll  = os.MkdirAll
+	checkAccess = syscall.Access
+)
 
 // Engine drives the dcgm-init metrics collection loop: it connects to DCGM via
 // the dcgm.Client, periodically collects GPU metrics, and writes them to a shared
@@ -160,24 +171,24 @@ func (e *Engine) Start() error {
 func (e *Engine) ensureOutputDir() error {
 	outputDir := filepath.Dir(e.outputPath)
 
-	info, statErr := os.Stat(outputDir)
+	info, statErr := osStat(outputDir)
 	if statErr == nil {
 		if !info.IsDir() {
 			return fmt.Errorf("output path %s exists but is not a directory: %w", outputDir, ErrOutputDirUnusable)
 		}
 		// Directory exists — confirm we can write into it rather than assuming.
-		if accessErr := syscall.Access(outputDir, unixWOK); accessErr != nil {
-			return fmt.Errorf("output directory %s is not writable: %v: %w", outputDir, accessErr, ErrOutputDirUnusable)
+		if accessErr := checkAccess(outputDir, unixWOK); accessErr != nil {
+			return fmt.Errorf("output directory %s is not writable: %w: %w", outputDir, accessErr, ErrOutputDirUnusable)
 		}
 		return nil
 	}
 	if !os.IsNotExist(statErr) {
-		return fmt.Errorf("failed to stat output directory %s: %v: %w", outputDir, statErr, ErrOutputDirUnusable)
+		return fmt.Errorf("failed to stat output directory %s: %w: %w", outputDir, statErr, ErrOutputDirUnusable)
 	}
 
 	// Directory does not exist — create it as a fallback.
-	if err := os.MkdirAll(outputDir, outputDirPermission); err != nil {
-		return fmt.Errorf("failed to create output directory %s: %v: %w", outputDir, err, ErrOutputDirUnusable)
+	if err := osMkdirAll(outputDir, outputDirPermission); err != nil {
+		return fmt.Errorf("failed to create output directory %s: %w: %w", outputDir, err, ErrOutputDirUnusable)
 	}
 	return nil
 }
