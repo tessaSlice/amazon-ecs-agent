@@ -32,9 +32,6 @@ import (
 )
 
 const (
-	// socketPath is the DCGM nv-hostengine Unix domain socket dcgm-init connects to.
-	socketPath = dcgm.DefaultSocketPath
-
 	// outputPath is the shared file where dcgm-init writes GPU metrics for the
 	// agent to consume. It must match the path the agent reads from.
 	outputPath = "/var/run/ecs/gpu-metrics.json"
@@ -60,6 +57,20 @@ const (
 	maxConsecutiveFailures = 5
 )
 
+// Filesystem operations used by ensureOutputDir and collectAndWrite, indirected
+// through package vars so tests can deterministically exercise each branch (a
+// real MkdirAll or write failure is permission-dependent and would not reproduce
+// under root, and outputPath is a fixed const that points outside a test's temp
+// dir). Production code uses the real os/syscall implementations.
+var (
+	osStat      = os.Stat
+	osMkdirAll  = os.MkdirAll
+	checkAccess = syscall.Access
+	osWriteFile = os.WriteFile
+	osRename    = os.Rename
+	osRemove    = os.Remove
+)
+
 // ErrSetup marks a startup/configuration failure (e.g. creating the output
 // directory or the initial DCGM reconciliation). main() maps errors wrapping it
 // to ExitSetupError; all other failures map to a generic runtime exit code.
@@ -72,14 +83,12 @@ type Engine struct {
 	client dcgm.Client
 }
 
-// New creates an Engine backed by a DCGM client.
+// New creates an Engine backed by a DCGM client. An empty dcgm.Config is passed
+// so NewClient applies its own defaults (DefaultSocketPath,
+// DefaultInitializationGracePeriod) rather than restating them here.
 func New() *Engine {
-	config := dcgm.Config{
-		SocketPath:                socketPath,
-		InitializationGracePeriod: dcgm.DefaultInitializationGracePeriod,
-	}
 	return &Engine{
-		client: dcgm.NewClient(config),
+		client: dcgm.NewClient(dcgm.Config{}),
 	}
 }
 
@@ -135,13 +144,13 @@ func (e *Engine) Start() error {
 func ensureOutputDir() error {
 	outputDir := filepath.Dir(outputPath)
 
-	info, statErr := os.Stat(outputDir)
+	info, statErr := osStat(outputDir)
 	if statErr == nil {
 		if !info.IsDir() {
 			return fmt.Errorf("%w: output path %s exists but is not a directory", ErrSetup, outputDir)
 		}
 		// Directory exists — confirm we can write into it rather than assuming.
-		if accessErr := syscall.Access(outputDir, unixWOK); accessErr != nil {
+		if accessErr := checkAccess(outputDir, unixWOK); accessErr != nil {
 			return fmt.Errorf("%w: output directory %s is not writable: %w", ErrSetup, outputDir, accessErr)
 		}
 		return nil
@@ -151,7 +160,7 @@ func ensureOutputDir() error {
 	}
 
 	// Directory does not exist — create it as a fallback.
-	if err := os.MkdirAll(outputDir, outputDirPermission); err != nil {
+	if err := osMkdirAll(outputDir, outputDirPermission); err != nil {
 		return fmt.Errorf("%w: failed to create output directory %s: %w", ErrSetup, outputDir, err)
 	}
 	return nil
@@ -169,26 +178,36 @@ func (e *Engine) run(ctx context.Context) error {
 	ticker := time.NewTicker(collectionFreq)
 	defer ticker.Stop()
 
+	return e.runLoop(ctx, ticker.C)
+}
+
+// runLoop performs the initial collection and then collects on each tick until
+// the context is cancelled or a persistent failure escalates. The tick channel
+// is a parameter (rather than created inside) so tests can drive the cadence
+// deterministically without waiting real time; production passes the real
+// collectionFreq ticker.
+//
+// A single failure is expected and non-fatal (transient DCGM hiccup, brief
+// connection loss). But a run that can never make progress — a permanently
+// unwritable output path, a deleted output directory, or a dead nv-hostengine
+// past the grace period — must not loop forever silently. We track two distinct
+// persistent-failure modes and, once either crosses maxConsecutiveFailures,
+// return an error so the process exits non-zero and systemd restarts it (a
+// restart may recover a transient issue and at least surfaces a permanent one
+// instead of hiding it). Any success resets the corresponding counter.
+//
+// The two are tracked separately because a lost DCGM connection and a failed
+// file write are independent: collectAndWrite still returns nil (it writes a
+// status-only snapshot) when DCGM is down, so a dead nv-hostengine would never
+// trip the write counter — the reconcile counter catches that case.
+func (e *Engine) runLoop(ctx context.Context, tick <-chan time.Time) error {
 	// If a shutdown signal arrived during startup (e.g. while Reconcile was
 	// blocking), skip the initial collection so we don't write during teardown.
 	if ctx.Err() != nil {
 		logger.Info("dcgm-init is shutting down before initial metrics collection")
 		return nil
 	}
-	// A single failure is expected and non-fatal (transient DCGM hiccup, brief
-	// connection loss). But a run that can never make progress — a permanently
-	// unwritable output path, a deleted output directory, or a dead nv-hostengine
-	// past the grace period — must not loop forever silently. We track two
-	// distinct persistent-failure modes and, once either crosses
-	// maxConsecutiveFailures, return an error so the process exits non-zero and
-	// systemd restarts it (a restart may recover a transient issue and at least
-	// surfaces a permanent one instead of hiding it). Any success resets the
-	// corresponding counter.
-	//
-	// The two are tracked separately because a lost DCGM connection and a failed
-	// file write are independent: collectAndWrite still returns nil (it writes a
-	// status-only snapshot) when DCGM is down, so a dead nv-hostengine would never
-	// trip the write counter — the reconcile counter catches that case.
+
 	consecutiveReconcileFailures := 0
 	consecutiveWriteFailures := 0
 
@@ -202,7 +221,7 @@ func (e *Engine) run(ctx context.Context) error {
 		case <-ctx.Done():
 			logger.Info("dcgm-init is shutting down metrics collection")
 			return nil
-		case <-ticker.C:
+		case <-tick:
 			if _, err := e.client.Reconcile(ctx); err != nil {
 				consecutiveReconcileFailures++
 				logger.Warn("dcgm-init client reconciliation failed", logger.Fields{
@@ -236,19 +255,14 @@ func (e *Engine) run(ctx context.Context) error {
 	}
 }
 
-// metricsOutput is the JSON structure written to the shared metrics file.
-// Its shape and tags must match what the agent reads.
+// metricsOutput is the JSON structure written to the shared metrics file when
+// GPU metrics are available. Its shape and tags must match what the agent reads.
+// It carries only telemetry: GPU health is not reported here. When metrics are
+// unavailable (DCGM disconnected), the file is truncated to empty instead of
+// writing this structure.
 type metricsOutput struct {
-	Timestamp       string `json:"timestamp"`
-	Healthy         bool   `json:"healthy"`
-	UnhealthyReason string `json:"unhealthy_reason,omitempty"`
-	// ConnectionLost indicates the DCGM/nv-hostengine connection is lost (outside
-	// the grace period). When true, the reader cannot determine GPU health and
-	// should report INSUFFICIENT_DATA rather than trusting Healthy: IsHealthy()
-	// returns true when disconnected (it only flips to false on a known
-	// violation/FAIL), so Healthy alone is not sufficient.
-	ConnectionLost bool                 `json:"connection_lost,omitempty"`
-	GPUs           []gputypes.GPUMetric `json:"gpus"`
+	Timestamp string               `json:"timestamp"`
+	GPUs      []gputypes.GPUMetric `json:"gpus"`
 }
 
 // getMetrics calls the DCGM client's GetMetrics but honors ctx cancellation.
@@ -278,14 +292,14 @@ func (e *Engine) getMetrics(ctx context.Context) ([]gputypes.GPUMetric, error) {
 }
 
 // collectAndWrite pulls the latest metrics from the DCGM client and writes them
-// to the shared output file. The write is atomic: data is written to a staging
-// file and then renamed onto the final path so readers never observe a partially
-// written file.
+// to the shared output file. When metrics are available it writes a fresh
+// {timestamp, gpus} snapshot; when the DCGM connection is down (GetMetrics
+// fails), it truncates the file to empty so a reader sees no stale GPU data
+// rather than a metrics list that no longer reflects reality.
 //
-// A failure to collect metrics (e.g. the DCGM connection is down) is not fatal:
-// we still write a fresh status snapshot reflecting the current health and
-// connection state so the shared file does not silently go stale. Only a marshal
-// or write/rename failure is returned as an error.
+// Either way the write is atomic: content is written to a staging file and then
+// renamed onto the final path so readers never observe a partially written file.
+// Only a marshal or write/rename failure is returned as an error.
 func (e *Engine) collectAndWrite(ctx context.Context) error {
 	// Re-ensure the output directory on every collection: it is created once in
 	// Start(), but /var/run is tmpfs and the directory can be pruned at runtime
@@ -298,23 +312,23 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 	metrics, err := e.getMetrics(ctx)
 	if err != nil {
 		// If the context was cancelled we are shutting down mid-collection; don't
-		// write a teardown snapshot, just unwind (the run loop will observe the
-		// cancellation and return).
+		// touch the file, just unwind (the run loop will observe the cancellation
+		// and return).
 		if ctx.Err() != nil {
 			return nil
 		}
-		// Keep going with no per-GPU metrics; the health/connection fields below
-		// still convey the current state to the reader with a fresh timestamp.
-		logger.Warn("dcgm-init failed to collect GPU metrics, writing status only", logger.Fields{"error": err})
-		metrics = []gputypes.GPUMetric{}
+		// DCGM is unavailable; wipe the file to empty so the reader does not keep
+		// serving the last (now stale) metrics as if they were current.
+		logger.Warn("dcgm-init failed to collect GPU metrics, emptying metrics file", logger.Fields{"error": err})
+		if writeErr := e.writeOutput(nil); writeErr != nil {
+			return writeErr
+		}
+		return nil
 	}
 
 	output := metricsOutput{
-		Timestamp:       time.Now().UTC().Format(time.RFC3339),
-		Healthy:         e.client.IsHealthy(),
-		UnhealthyReason: e.client.UnhealthyReason(),
-		ConnectionLost:  e.client.IsConnectionLost(),
-		GPUs:            metrics,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		GPUs:      metrics,
 	}
 
 	data, err := json.MarshalIndent(output, "", "  ")
@@ -322,21 +336,30 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	// Write to a temporary file and then atomically rename it onto the final
-	// path so a concurrent reader (the agent) never observes a partially written
-	// file. The reader always consumes outputPath; outputPath+".tmp" is only
-	// the transient write target that the rename moves into place.
-	tmpPath := outputPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, outputFilePermission); err != nil {
-		return fmt.Errorf("failed to write metrics to %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, outputPath); err != nil {
-		// Best-effort cleanup so a failed rename does not leave an orphaned
-		// temp file behind on every collection tick.
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, outputPath, err)
+	if err := e.writeOutput(data); err != nil {
+		return err
 	}
 
 	logger.Info("metrics written", logger.Fields{"path": outputPath, "gpuCount": len(output.GPUs)})
+	return nil
+}
+
+// writeOutput atomically replaces the shared metrics file with data. Passing nil
+// (or empty) data truncates the file to zero bytes, which is how a disconnection
+// is signalled. Content is written to a staging file and then renamed onto the
+// final path so a concurrent reader (the agent) never observes a partially
+// written file. The reader always consumes outputPath; outputPath+".tmp" is only
+// the transient write target that the rename moves into place.
+func (e *Engine) writeOutput(data []byte) error {
+	tmpPath := outputPath + ".tmp"
+	if err := osWriteFile(tmpPath, data, outputFilePermission); err != nil {
+		return fmt.Errorf("failed to write metrics to %s: %w", tmpPath, err)
+	}
+	if err := osRename(tmpPath, outputPath); err != nil {
+		// Best-effort cleanup so a failed rename does not leave an orphaned
+		// temp file behind on every collection tick.
+		osRemove(tmpPath)
+		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, outputPath, err)
+	}
 	return nil
 }
