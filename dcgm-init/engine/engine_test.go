@@ -18,6 +18,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"syscall"
 	"testing"
@@ -143,24 +144,28 @@ func TestRunLoopEscalatesPersistentReconcileFailures(t *testing.T) {
 	captureWrites(t)
 
 	mockClient := mock_dcgm.NewMockClient(ctrl)
-	// Every tick-loop reconcile fails (runLoop does not call the initial
-	// Reconcile — run() does — so all reconcile calls here are loop ticks).
+	// Reconcile fails every tick and, on failure, GetMetrics also fails (a lost
+	// connection), so no tick emits real metrics.
 	mockClient.EXPECT().Reconcile(gomock.Any()).Return(false, assert.AnError).AnyTimes()
-	// Metrics may still be queried on each tick; keep them succeeding so only the
-	// reconcile counter escalates.
-	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{}, nil).AnyTimes()
+	mockClient.EXPECT().GetMetrics(gomock.Any()).Return(nil, assert.AnError).AnyTimes()
 
 	eng := newTestEngine(mockClient)
-	err := eng.runLoop(context.Background(), fireTicks(maxConsecutiveFailures))
+	// Supply exactly enough ticks to reach the threshold. The initial collection
+	// (before the loop) is failure #1, so maxConsecutiveFailures-1 ticks escalate.
+	err := eng.runLoop(context.Background(), fireTicks(maxConsecutiveFailures-1))
 
-	require.Error(t, err, "runLoop should give up after persistent reconcile failures")
-	assert.Contains(t, err.Error(), "consecutive DCGM reconciliation failures")
+	require.Error(t, err, "runLoop should give up after persistent reconcile/collection failures")
+	assert.Contains(t, err.Error(), "consecutive failures to emit GPU metrics")
+	// Pin the exact threshold so an off-by-one in the counter is caught.
+	assert.Contains(t, err.Error(),
+		fmt.Sprintf("%d consecutive", maxConsecutiveFailures),
+		"should escalate exactly at maxConsecutiveFailures")
 }
 
 // TestRunLoopEscalatesPersistentWriteFailures verifies the write
-// failure-escalation: once collectAndWrite fails maxConsecutiveFailures times in
-// a row (e.g. a read-only filesystem), runLoop returns an error instead of
-// looping forever.
+// failure-escalation: once collectAndWrite fails to emit metrics
+// maxConsecutiveFailures times in a row (e.g. a read-only filesystem), runLoop
+// returns an error instead of looping forever.
 func TestRunLoopEscalatesPersistentWriteFailures(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -181,18 +186,55 @@ func TestRunLoopEscalatesPersistentWriteFailures(t *testing.T) {
 	mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
 
 	eng := newTestEngine(mockClient)
-	// The initial collection (before the first tick) is one write failure, so
+	// The initial collection (before the first tick) is failure #1, so
 	// maxConsecutiveFailures-1 more ticks reach the threshold.
 	err := eng.runLoop(context.Background(), fireTicks(maxConsecutiveFailures-1))
 
 	require.Error(t, err, "runLoop should give up after persistent write failures")
-	assert.Contains(t, err.Error(), "consecutive metrics write failures")
+	assert.Contains(t, err.Error(), "consecutive failures to emit GPU metrics")
+	assert.Contains(t, err.Error(),
+		fmt.Sprintf("%d consecutive", maxConsecutiveFailures),
+		"should escalate exactly at maxConsecutiveFailures")
+}
+
+// TestRunLoopResetsFailureCountOnSuccess verifies the escalation counter is
+// consecutive: a successful emit between failures prevents escalation. With
+// GetMetrics alternating fail/succeed, the counter never reaches the threshold,
+// so runLoop keeps looping until the tick channel drains and the context is
+// cancelled — it must NOT return an escalation error.
+func TestRunLoopResetsFailureCountOnSuccess(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	captureWrites(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mockClient := mock_dcgm.NewMockClient(ctrl)
+	mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
+	// Alternate fail, succeed, fail, succeed... so consecutiveFailures never
+	// climbs past 1. gomock plays these in order; AnyTimes tail keeps it safe.
+	gomock.InOrder(
+		mockClient.EXPECT().GetMetrics(gomock.Any()).Return(nil, assert.AnError).Times(1),
+		mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{{GPUUUID: "g"}}, nil).Times(1),
+		mockClient.EXPECT().GetMetrics(gomock.Any()).Return(nil, assert.AnError).Times(1),
+		mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{{GPUUUID: "g"}}, nil).Times(1),
+	)
+	// After the scripted 4 collections, cancel so runLoop exits cleanly.
+	mockClient.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(
+		func(context.Context) ([]gputypes.GPUMetric, error) {
+			cancel()
+			return []gputypes.GPUMetric{{GPUUUID: "g"}}, nil
+		}).AnyTimes()
+
+	eng := newTestEngine(mockClient)
+	err := eng.runLoop(ctx, fireTicks(maxConsecutiveFailures*3))
+	assert.NoError(t, err, "alternating failures must not escalate; runLoop should exit nil on cancel")
 }
 
 // fireTicks returns a tick channel pre-loaded with n ticks. runLoop consumes one
-// per iteration; escalation is expected to fire before the channel drains, and
-// any surplus ticks are harmless. The channel is buffered so sending never
-// blocks the test.
+// per iteration. Escalation tests size n so the channel is not exhausted before
+// escalation fires; if escalation never fired, the loop would block on the empty
+// channel and the test would time out — a deliberate, visible failure mode.
 func fireTicks(n int) <-chan time.Time {
 	ch := make(chan time.Time, n)
 	for i := 0; i < n; i++ {
@@ -356,12 +398,14 @@ func TestCollectAndWriteCreatesValidJSON(t *testing.T) {
 			MemoryUsed:         &memUsed,
 			PowerDraw:          &power,
 			Temperature:        &temp,
-			RestartAppXidCount: 0,
+			RestartAppXidCount: 3, // non-zero so the round-trip is actually exercised
 		},
 	})
 	eng := newTestEngine(mockClient)
 
-	require.NoError(t, eng.collectAndWrite(context.Background()))
+	emitted, err := eng.collectAndWrite(context.Background())
+	require.NoError(t, err)
+	assert.True(t, emitted, "a successful collection should report emitted=true")
 
 	var output metricsOutput
 	require.NoError(t, json.Unmarshal(committed(), &output))
@@ -375,7 +419,7 @@ func TestCollectAndWriteCreatesValidJSON(t *testing.T) {
 	assert.Equal(t, uint64(8053063680), *output.GPUs[0].MemoryUsed)
 	assert.Equal(t, 250.5, *output.GPUs[0].PowerDraw)
 	assert.Equal(t, 72.0, *output.GPUs[0].Temperature)
-	assert.Equal(t, int64(0), output.GPUs[0].RestartAppXidCount)
+	assert.Equal(t, int64(3), output.GPUs[0].RestartAppXidCount)
 }
 
 // TestCollectAndWriteAtomicRename verifies the staging file is renamed onto the
@@ -409,17 +453,20 @@ func TestCollectAndWriteAtomicRename(t *testing.T) {
 	mockClient := metricsClient(ctrl, []gputypes.GPUMetric{{GPUUUID: "GPU-test-001"}})
 	eng := newTestEngine(mockClient)
 
-	require.NoError(t, eng.collectAndWrite(context.Background()))
+	emitted, err := eng.collectAndWrite(context.Background())
+	require.NoError(t, err)
+	assert.True(t, emitted)
 	assert.True(t, renamed, "collectAndWrite should rename the staging file onto the final path")
 	assert.True(t, live[outputPath], "final file should exist after rename")
 	assert.False(t, live[outputPath+".tmp"], "staging file should not remain after rename")
 }
 
-// TestCollectAndWriteWipesFileOnDisconnection verifies that when GetMetrics
-// fails (DCGM disconnected), collectAndWrite truncates the shared file to empty
-// rather than writing stale or partial metrics. The write is non-fatal (nil
-// error) so the run loop keeps retrying.
-func TestCollectAndWriteWipesFileOnDisconnection(t *testing.T) {
+// TestCollectAndWriteEmptySnapshotOnDisconnection verifies that when GetMetrics
+// fails (DCGM disconnected), collectAndWrite writes a valid-JSON but empty
+// snapshot ({timestamp, gpus: []}) rather than stale, partial, or malformed
+// content — and reports emitted=false so the run loop can escalate a persistent
+// failure. The write itself is non-fatal (nil error) so the loop keeps retrying.
+func TestCollectAndWriteEmptySnapshotOnDisconnection(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	committed := captureWrites(t)
@@ -428,15 +475,26 @@ func TestCollectAndWriteWipesFileOnDisconnection(t *testing.T) {
 	mockClient.EXPECT().GetMetrics(gomock.Any()).Return(nil, assert.AnError).AnyTimes()
 
 	eng := newTestEngine(mockClient)
-	require.NoError(t, eng.collectAndWrite(context.Background()), "collectAndWrite should not fail when GetMetrics fails")
+	emitted, err := eng.collectAndWrite(context.Background())
+	require.NoError(t, err, "collectAndWrite should not fail when GetMetrics fails")
+	assert.False(t, emitted, "a disconnection should report emitted=false so the loop can escalate")
 
-	assert.Empty(t, committed(), "the metrics file should be emptied (0 bytes) on disconnection")
+	// The file must be written (not left untouched) AND be valid JSON with an
+	// empty GPU list — this distinguishes "wrote empty snapshot" from "wrote
+	// nothing", which the previous 0-byte assertion could not.
+	raw := committed()
+	require.NotEmpty(t, raw, "an empty snapshot must still be written to the file")
+	var output metricsOutput
+	require.NoError(t, json.Unmarshal(raw, &output), "the disconnect snapshot must be valid JSON")
+	assert.NotEmpty(t, output.Timestamp, "the empty snapshot should carry a fresh timestamp")
+	assert.Empty(t, output.GPUs, "no GPU metrics should be present on disconnection")
 }
 
-// TestCollectAndWriteWipesAfterPreviousMetrics verifies that a disconnection
-// following a successful collection replaces the previously written metrics with
-// an empty file, so a reader never keeps serving stale GPU data.
-func TestCollectAndWriteWipesAfterPreviousMetrics(t *testing.T) {
+// TestCollectAndWriteEmptySnapshotAfterPreviousMetrics verifies that a
+// disconnection following a successful collection replaces the previously
+// written metrics with an empty snapshot, so a reader never keeps serving stale
+// GPU data.
+func TestCollectAndWriteEmptySnapshotAfterPreviousMetrics(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	committed := captureWrites(t)
@@ -452,14 +510,20 @@ func TestCollectAndWriteWipesAfterPreviousMetrics(t *testing.T) {
 	eng := newTestEngine(mockClient)
 
 	// First collection writes real metrics.
-	require.NoError(t, eng.collectAndWrite(context.Background()))
+	emitted, err := eng.collectAndWrite(context.Background())
+	require.NoError(t, err)
+	assert.True(t, emitted)
 	var first metricsOutput
 	require.NoError(t, json.Unmarshal(committed(), &first))
 	require.Len(t, first.GPUs, 1)
 
-	// Second collection (disconnected) wipes the file.
-	require.NoError(t, eng.collectAndWrite(context.Background()))
-	assert.Empty(t, committed(), "a disconnection after a good collection should empty the file")
+	// Second collection (disconnected) replaces the metrics with an empty snapshot.
+	emitted, err = eng.collectAndWrite(context.Background())
+	require.NoError(t, err)
+	assert.False(t, emitted)
+	var second metricsOutput
+	require.NoError(t, json.Unmarshal(committed(), &second), "the replacement must be valid JSON")
+	assert.Empty(t, second.GPUs, "a disconnection after a good collection should clear the GPU list")
 }
 
 // TestCollectAndWriteFailsWhenOutputDirUnusable verifies collectAndWrite
@@ -479,8 +543,9 @@ func TestCollectAndWriteFailsWhenOutputDirUnusable(t *testing.T) {
 	// GetMetrics should not even be reached; allow zero calls.
 	eng := newTestEngine(mockClient)
 
-	err := eng.collectAndWrite(context.Background())
+	emitted, err := eng.collectAndWrite(context.Background())
 	require.Error(t, err)
+	assert.False(t, emitted, "a failed collection should report emitted=false")
 	assert.ErrorIs(t, err, ErrSetup, "a runtime-unusable output dir should wrap ErrSetup")
 }
 

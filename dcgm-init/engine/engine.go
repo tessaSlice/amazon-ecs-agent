@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -81,6 +82,13 @@ var ErrSetup = errors.New("dcgm-init setup failed")
 // JSON file that the agent reads.
 type Engine struct {
 	client dcgm.Client
+
+	// collectsInFlight counts GetMetrics goroutines that have not yet returned.
+	// getMetrics may abandon a goroutine (blocked in a non-cancellable DCGM cgo
+	// call) when the context is cancelled; Start consults this before calling
+	// client.Shutdown so it never frees DCGM C resources out from under an
+	// in-flight call. It is >0 only while such a call is executing.
+	collectsInFlight atomic.Int32
 }
 
 // New creates an Engine backed by a DCGM client. An empty dcgm.Config is passed
@@ -102,6 +110,17 @@ func New() *Engine {
 // no ExecStop.
 func (e *Engine) Start() error {
 	defer func() {
+		// If a GetMetrics call is still executing (its goroutine was abandoned
+		// because a non-cancellable DCGM cgo call wedged during shutdown), skip
+		// Shutdown: freeing the DCGM connection and field groups now would race
+		// the in-flight cgo call against a concurrent C-resource teardown. The
+		// process is exiting anyway, so the OS reclaims everything; a wedged
+		// nv-hostengine connection is not worth a use-after-free to close.
+		if inFlight := e.collectsInFlight.Load(); inFlight > 0 {
+			logger.Warn("dcgm-init skipping DCGM shutdown; a metrics collection is still in flight",
+				logger.Fields{"collectsInFlight": inFlight})
+			return
+		}
 		if err := e.client.Shutdown(); err != nil {
 			logger.Warn("dcgm-init failed to shut down DCGM client cleanly", logger.Fields{"error": err})
 		}
@@ -181,25 +200,26 @@ func (e *Engine) run(ctx context.Context) error {
 	return e.runLoop(ctx, ticker.C)
 }
 
-// runLoop performs the initial collection and then collects on each tick until
-// the context is cancelled or a persistent failure escalates. The tick channel
-// is a parameter (rather than created inside) so tests can drive the cadence
-// deterministically without waiting real time; production passes the real
-// collectionFreq ticker.
+// runLoop performs the initial collection and then reconciles and collects on
+// each tick until the context is cancelled or a persistent failure escalates.
+// The tick channel is a parameter (rather than created inside) so tests can
+// drive the cadence deterministically without waiting real time; production
+// passes the real collectionFreq ticker.
 //
-// A single failure is expected and non-fatal (transient DCGM hiccup, brief
+// A single failed tick is expected and non-fatal (transient DCGM hiccup, brief
 // connection loss). But a run that can never make progress — a permanently
-// unwritable output path, a deleted output directory, or a dead nv-hostengine
-// past the grace period — must not loop forever silently. We track two distinct
-// persistent-failure modes and, once either crosses maxConsecutiveFailures,
-// return an error so the process exits non-zero and systemd restarts it (a
-// restart may recover a transient issue and at least surfaces a permanent one
-// instead of hiding it). Any success resets the corresponding counter.
+// unwritable output path, a deleted output directory, or a dead/unresponsive
+// nv-hostengine past the grace period — must not loop forever silently. A
+// single counter tracks consecutive ticks that failed to emit real GPU metrics,
+// for ANY reason (reconcile error, collection/disconnect, or file-write error).
+// Once it reaches maxConsecutiveFailures we return an error so the process exits
+// non-zero and systemd restarts it; any tick that emits real metrics resets it.
 //
-// The two are tracked separately because a lost DCGM connection and a failed
-// file write are independent: collectAndWrite still returns nil (it writes a
-// status-only snapshot) when DCGM is down, so a dead nv-hostengine would never
-// trip the write counter — the reconcile counter catches that case.
+// Tracking a single "did not make progress" counter (rather than one per failure
+// mode) is deliberate: a live-but-unreadable DCGM connection makes Reconcile
+// succeed while GetMetrics fails, which would slip past separate reconcile/write
+// counters and wipe the file forever. What matters for liveness is simply
+// whether real metrics are being emitted.
 func (e *Engine) runLoop(ctx context.Context, tick <-chan time.Time) error {
 	// If a shutdown signal arrived during startup (e.g. while Reconcile was
 	// blocking), skip the initial collection so we don't write during teardown.
@@ -208,12 +228,32 @@ func (e *Engine) runLoop(ctx context.Context, tick <-chan time.Time) error {
 		return nil
 	}
 
-	consecutiveReconcileFailures := 0
-	consecutiveWriteFailures := 0
+	consecutiveFailures := 0
+	// escalate records the outcome of a tick and, on a persistent inability to
+	// emit real metrics, returns a terminal error for runLoop to propagate. The
+	// error deliberately does NOT wrap the underlying cause with %w: a runtime
+	// escalation is a generic failure (ExitError), distinct from a startup
+	// ErrSetup (ExitSetupError), and the cause may transitively wrap ErrSetup.
+	escalate := func(emitted bool, cause error) error {
+		if emitted {
+			consecutiveFailures = 0
+			return nil
+		}
+		consecutiveFailures++
+		logger.Warn("dcgm-init failed to emit GPU metrics", logger.Fields{
+			"error":               cause,
+			"consecutiveFailures": consecutiveFailures,
+		})
+		if consecutiveFailures >= maxConsecutiveFailures {
+			return fmt.Errorf("dcgm-init giving up after %d consecutive failures to emit GPU metrics: %v",
+				consecutiveFailures, cause)
+		}
+		return nil
+	}
 
-	if err := e.collectAndWrite(ctx); err != nil {
-		consecutiveWriteFailures++
-		logger.Warn("dcgm-init initial collection failed, will retry", logger.Fields{"error": err})
+	emitted, err := e.collectAndWrite(ctx)
+	if escErr := escalate(emitted, err); escErr != nil {
+		return escErr
 	}
 
 	for {
@@ -222,44 +262,26 @@ func (e *Engine) runLoop(ctx context.Context, tick <-chan time.Time) error {
 			logger.Info("dcgm-init is shutting down metrics collection")
 			return nil
 		case <-tick:
+			// Reconcile reconnects a dropped DCGM connection; log its error but
+			// let the collection outcome below drive escalation (a reconcile
+			// failure is followed by a collection failure on the same tick).
 			if _, err := e.client.Reconcile(ctx); err != nil {
-				consecutiveReconcileFailures++
-				logger.Warn("dcgm-init client reconciliation failed", logger.Fields{
-					"error":               err,
-					"consecutiveFailures": consecutiveReconcileFailures,
-				})
-				// Fall through and still write a status update so the shared
-				// file reflects the current (likely connection-lost) health
-				// with a fresh timestamp rather than silently going stale.
-				if consecutiveReconcileFailures >= maxConsecutiveFailures {
-					return fmt.Errorf("dcgm-init giving up after %d consecutive DCGM reconciliation failures: %w",
-						consecutiveReconcileFailures, err)
-				}
-			} else {
-				consecutiveReconcileFailures = 0
+				logger.Warn("dcgm-init client reconciliation failed", logger.Fields{"error": err})
 			}
-			if err := e.collectAndWrite(ctx); err != nil {
-				consecutiveWriteFailures++
-				logger.Warn("dcgm-init metrics collection failed", logger.Fields{
-					"error":               err,
-					"consecutiveFailures": consecutiveWriteFailures,
-				})
-				if consecutiveWriteFailures >= maxConsecutiveFailures {
-					return fmt.Errorf("dcgm-init giving up after %d consecutive metrics write failures: %w",
-						consecutiveWriteFailures, err)
-				}
-			} else {
-				consecutiveWriteFailures = 0
+			emitted, err := e.collectAndWrite(ctx)
+			if escErr := escalate(emitted, err); escErr != nil {
+				return escErr
 			}
 		}
 	}
 }
 
-// metricsOutput is the JSON structure written to the shared metrics file when
-// GPU metrics are available. Its shape and tags must match what the agent reads.
-// It carries only telemetry: GPU health is not reported here. When metrics are
-// unavailable (DCGM disconnected), the file is truncated to empty instead of
-// writing this structure.
+// metricsOutput is the JSON structure written to the shared metrics file. Its
+// shape and tags must match what the agent reads. It carries only telemetry: GPU
+// health is not reported here. When metrics are unavailable (DCGM disconnected),
+// the same structure is written with an empty GPUs list rather than truncating
+// the file, so the reader always parses valid JSON and distinguishes "no GPU
+// data" from a malformed file.
 type metricsOutput struct {
 	Timestamp string               `json:"timestamp"`
 	GPUs      []gputypes.GPUMetric `json:"gpus"`
@@ -272,13 +294,19 @@ type metricsOutput struct {
 // in a goroutine lets us return promptly on ctx.Done(); the goroutine (and the
 // blocked cgo call) is abandoned but the buffered channel ensures it does not
 // leak on the normal completion path.
+//
+// collectsInFlight is incremented for the lifetime of the client call so that
+// Start's deferred Shutdown can detect an abandoned-but-still-running call and
+// avoid tearing down DCGM C resources concurrently with it.
 func (e *Engine) getMetrics(ctx context.Context) ([]gputypes.GPUMetric, error) {
 	type result struct {
 		metrics []gputypes.GPUMetric
 		err     error
 	}
 	resCh := make(chan result, 1)
+	e.collectsInFlight.Add(1)
 	go func() {
+		defer e.collectsInFlight.Add(-1)
 		metrics, err := e.client.GetMetrics(ctx)
 		resCh <- result{metrics: metrics, err: err}
 	}()
@@ -293,20 +321,22 @@ func (e *Engine) getMetrics(ctx context.Context) ([]gputypes.GPUMetric, error) {
 
 // collectAndWrite pulls the latest metrics from the DCGM client and writes them
 // to the shared output file. When metrics are available it writes a fresh
-// {timestamp, gpus} snapshot; when the DCGM connection is down (GetMetrics
-// fails), it truncates the file to empty so a reader sees no stale GPU data
-// rather than a metrics list that no longer reflects reality.
+// {timestamp, gpus} snapshot and reports emitted=true; when the DCGM connection
+// is down (GetMetrics fails), it writes a valid but empty {timestamp, gpus: []}
+// snapshot so a reader parses cleanly and sees no stale GPU data, and reports
+// emitted=false so the run loop can escalate a persistent inability to collect.
 //
-// Either way the write is atomic: content is written to a staging file and then
-// renamed onto the final path so readers never observe a partially written file.
-// Only a marshal or write/rename failure is returned as an error.
-func (e *Engine) collectAndWrite(ctx context.Context) error {
+// The returned bool is "real GPU metrics were emitted this call"; err is only a
+// marshal or write/rename failure (also emitted=false). A shutdown-triggered
+// cancellation returns (false, nil) without touching the file. Either write is
+// atomic: content is staged and renamed so readers never see a partial file.
+func (e *Engine) collectAndWrite(ctx context.Context) (emitted bool, err error) {
 	// Re-ensure the output directory on every collection: it is created once in
 	// Start(), but /var/run is tmpfs and the directory can be pruned at runtime
 	// (systemd-tmpfiles, a cleanup job). os.WriteFile does not recreate missing
 	// parents, so without this a deleted directory would freeze metrics forever.
 	if err := ensureOutputDir(); err != nil {
-		return err
+		return false, err
 	}
 
 	metrics, err := e.getMetrics(ctx)
@@ -315,41 +345,51 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 		// touch the file, just unwind (the run loop will observe the cancellation
 		// and return).
 		if ctx.Err() != nil {
-			return nil
+			return false, nil
 		}
-		// DCGM is unavailable; wipe the file to empty so the reader does not keep
-		// serving the last (now stale) metrics as if they were current.
-		logger.Warn("dcgm-init failed to collect GPU metrics, emptying metrics file", logger.Fields{"error": err})
-		if writeErr := e.writeOutput(nil); writeErr != nil {
-			return writeErr
+		// DCGM is unavailable; write an empty (but valid-JSON) snapshot so the
+		// reader parses cleanly and does not keep serving the last (now stale)
+		// metrics as if they were current. Report emitted=false so a persistent
+		// failure escalates rather than looping forever.
+		logger.Warn("dcgm-init failed to collect GPU metrics, writing empty snapshot", logger.Fields{"error": err})
+		if writeErr := e.writeSnapshot(nil); writeErr != nil {
+			return false, writeErr
 		}
-		return nil
+		return false, nil
 	}
 
+	if err := e.writeSnapshot(metrics); err != nil {
+		return false, err
+	}
+
+	logger.Info("metrics written", logger.Fields{"path": outputPath, "gpuCount": len(metrics)})
+	return true, nil
+}
+
+// writeSnapshot marshals a {timestamp, gpus} snapshot and atomically writes it to
+// the shared output file. A nil metrics slice is normalized to an empty (non-nil)
+// list so the JSON is always a valid object with "gpus": [] rather than null,
+// which is how a disconnection is represented.
+func (e *Engine) writeSnapshot(metrics []gputypes.GPUMetric) error {
+	if metrics == nil {
+		metrics = []gputypes.GPUMetric{}
+	}
 	output := metricsOutput{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		GPUs:      metrics,
 	}
-
 	data, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
-
-	if err := e.writeOutput(data); err != nil {
-		return err
-	}
-
-	logger.Info("metrics written", logger.Fields{"path": outputPath, "gpuCount": len(output.GPUs)})
-	return nil
+	return e.writeOutput(data)
 }
 
-// writeOutput atomically replaces the shared metrics file with data. Passing nil
-// (or empty) data truncates the file to zero bytes, which is how a disconnection
-// is signalled. Content is written to a staging file and then renamed onto the
-// final path so a concurrent reader (the agent) never observes a partially
-// written file. The reader always consumes outputPath; outputPath+".tmp" is only
-// the transient write target that the rename moves into place.
+// writeOutput atomically replaces the shared metrics file with data. Content is
+// written to a staging file and then renamed onto the final path so a concurrent
+// reader (the agent) never observes a partially written file. The reader always
+// consumes outputPath; outputPath+".tmp" is only the transient write target that
+// the rename moves into place.
 func (e *Engine) writeOutput(data []byte) error {
 	tmpPath := outputPath + ".tmp"
 	if err := osWriteFile(tmpPath, data, outputFilePermission); err != nil {
