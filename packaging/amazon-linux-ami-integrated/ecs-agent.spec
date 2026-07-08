@@ -42,6 +42,7 @@ Source5:        amazon-ecs-volume-plugin.conf
 Source6:        ebs-csi-driver-arm64-v%{version}.tar
 Source7:        ebs-csi-driver-v%{version}.tar
 Source8:        dcgm-init.service
+Source9:        dcgm-init.tmpfiles.conf
 
 BuildRequires:  golang >= 1.25.0
 %if %{with systemd}
@@ -288,6 +289,15 @@ mkdir -p %{buildroot}%{_sysconfdir}/ecs
 touch %{buildroot}%{_sysconfdir}/ecs/ecs.config
 touch %{buildroot}%{_sysconfdir}/ecs/ecs.config.json
 
+# Pre-create the GPU metrics runtime directory and its files so the agent
+# container can bind-mount /var/run/ecs unconditionally without ecs-init having
+# to mkdir it at container-start time. dcgm-init writes gpu-metrics.json (via a
+# gpu-metrics.json.tmp staging file that it atomically renames into place) and
+# the agent reads gpu-metrics.json.
+mkdir -p %{buildroot}/var/run/ecs
+touch %{buildroot}/var/run/ecs/gpu-metrics.json
+touch %{buildroot}/var/run/ecs/gpu-metrics.json.tmp
+
 mkdir -p %{buildroot}%{ebs_csi_driver_dir}
 %ifarch aarch64
 install -m %{no_exec_perm} -D %{SOURCE6} %{buildroot}%{ebs_csi_driver_dir}/ebs-csi-driver.tar
@@ -307,6 +317,9 @@ install -m %{no_exec_perm} -D %{SOURCE2} $RPM_BUILD_ROOT/%{_unitdir}/ecs.service
 install -m %{no_exec_perm} -D %{SOURCE3} $RPM_BUILD_ROOT/%{_unitdir}/amazon-ecs-volume-plugin.service
 install -m %{no_exec_perm} -D %{SOURCE4} $RPM_BUILD_ROOT/%{_unitdir}/amazon-ecs-volume-plugin.socket
 install -m %{no_exec_perm} -D %{SOURCE8} $RPM_BUILD_ROOT/%{_unitdir}/dcgm-init.service
+# systemd-tmpfiles rule that recreates /var/run/ecs + the gpu-metrics files on
+# every boot (they live on tmpfs and are not persisted in the root filesystem).
+install -m %{no_exec_perm} -D %{SOURCE9} $RPM_BUILD_ROOT%{_tmpfilesdir}/dcgm-init.conf
 %else
 install -m %{no_exec_perm} -D %{SOURCE1} %{buildroot}%{_sysconfdir}/init/ecs.conf
 install -m %{no_exec_perm} -D %{SOURCE5} %{buildroot}%{_sysconfdir}/init/amazon-ecs-volume-plugin.conf
@@ -320,6 +333,12 @@ install -m %{no_exec_perm} -D %{SOURCE5} %{buildroot}%{_sysconfdir}/init/amazon-
 %dir %{_sysconfdir}/ecs
 %config(noreplace) %ghost %{_sysconfdir}/ecs/ecs.config
 %config(noreplace) %ghost %{_sysconfdir}/ecs/ecs.config.json
+# GPU metrics runtime dir + files (written by dcgm-init, read by the agent).
+# Marked %ghost because /var/run is tmpfs: the paths are owned by the package
+# but their content is not shipped in the payload.
+%dir /var/run/ecs
+%ghost /var/run/ecs/gpu-metrics.json
+%ghost /var/run/ecs/gpu-metrics.json.tmp
 %ghost %{_cachedir}/ecs/ecs-agent.tar
 %{_cachedir}/ecs/%{basename:%{agent_image}}
 %{_cachedir}/ecs/state
@@ -332,6 +351,7 @@ install -m %{no_exec_perm} -D %{SOURCE5} %{buildroot}%{_sysconfdir}/init/amazon-
 %{_unitdir}/amazon-ecs-volume-plugin.service
 %{_unitdir}/amazon-ecs-volume-plugin.socket
 %{_unitdir}/dcgm-init.service
+%{_tmpfilesdir}/dcgm-init.conf
 %else
 %{_sysconfdir}/init/ecs.conf
 %{_sysconfdir}/init/amazon-ecs-volume-plugin.conf
@@ -344,6 +364,9 @@ ln -sf %{basename:%{agent_image}} %{_cachedir}/ecs/ecs-agent.tar
 %systemd_post ecs
 %systemd_post amazon-ecs-volume-plugin.service
 %systemd_post dcgm-init.service
+# Apply the tmpfiles rule now so /var/run/ecs and the gpu-metrics files exist
+# immediately after install, not only after the next boot.
+systemd-tmpfiles --create %{_tmpfilesdir}/dcgm-init.conf >/dev/null 2>&1 || :
 
 %postun
 %systemd_postun ecs
