@@ -47,6 +47,17 @@ const (
 
 	// outputFilePermission is the permission for the metrics file (and its staging copy).
 	outputFilePermission = 0644
+
+	// unixWOK is the write-permission mode (W_OK) passed to syscall.Access to
+	// test whether this process can write into the output directory.
+	unixWOK = 0x2
+
+	// maxConsecutiveFailures is the number of consecutive per-tick failures
+	// (persistent DCGM reconciliation loss, or metrics write failures) after
+	// which run() gives up and returns an error so the process exits non-zero
+	// and systemd restarts it, rather than looping forever while the shared
+	// file silently goes stale.
+	maxConsecutiveFailures = 5
 )
 
 // ErrSetup marks a startup/configuration failure (e.g. creating the output
@@ -106,12 +117,44 @@ func (e *Engine) Start() error {
 		}
 	}()
 
-	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, outputDirPermission); err != nil {
-		return fmt.Errorf("%w: failed to create output directory %s: %w", ErrSetup, outputDir, err)
+	if err := ensureOutputDir(); err != nil {
+		return err
 	}
 
 	return e.run(ctx)
+}
+
+// ensureOutputDir makes sure the directory holding the metrics file exists and
+// is writable by this process before (and during) the collection loop. The
+// directory is normally pre-created by the package install / a systemd-tmpfiles
+// rule, so the common path is a stat + writability check; MkdirAll is only a
+// fallback for when it is genuinely absent (e.g. a tmpfs entry that was not
+// recreated). A path that exists but is not a writable directory is a
+// configuration problem a restart cannot fix, so it is returned wrapping
+// ErrSetup, which main() maps to ExitSetupError.
+func ensureOutputDir() error {
+	outputDir := filepath.Dir(outputPath)
+
+	info, statErr := os.Stat(outputDir)
+	if statErr == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%w: output path %s exists but is not a directory", ErrSetup, outputDir)
+		}
+		// Directory exists — confirm we can write into it rather than assuming.
+		if accessErr := syscall.Access(outputDir, unixWOK); accessErr != nil {
+			return fmt.Errorf("%w: output directory %s is not writable: %w", ErrSetup, outputDir, accessErr)
+		}
+		return nil
+	}
+	if !os.IsNotExist(statErr) {
+		return fmt.Errorf("%w: failed to stat output directory %s: %w", ErrSetup, outputDir, statErr)
+	}
+
+	// Directory does not exist — create it as a fallback.
+	if err := os.MkdirAll(outputDir, outputDirPermission); err != nil {
+		return fmt.Errorf("%w: failed to create output directory %s: %w", ErrSetup, outputDir, err)
+	}
+	return nil
 }
 
 // run reconciles the DCGM connection, then collects and writes metrics on each
@@ -132,7 +175,25 @@ func (e *Engine) run(ctx context.Context) error {
 		logger.Info("dcgm-init is shutting down before initial metrics collection")
 		return nil
 	}
+	// A single failure is expected and non-fatal (transient DCGM hiccup, brief
+	// connection loss). But a run that can never make progress — a permanently
+	// unwritable output path, a deleted output directory, or a dead nv-hostengine
+	// past the grace period — must not loop forever silently. We track two
+	// distinct persistent-failure modes and, once either crosses
+	// maxConsecutiveFailures, return an error so the process exits non-zero and
+	// systemd restarts it (a restart may recover a transient issue and at least
+	// surfaces a permanent one instead of hiding it). Any success resets the
+	// corresponding counter.
+	//
+	// The two are tracked separately because a lost DCGM connection and a failed
+	// file write are independent: collectAndWrite still returns nil (it writes a
+	// status-only snapshot) when DCGM is down, so a dead nv-hostengine would never
+	// trip the write counter — the reconcile counter catches that case.
+	consecutiveReconcileFailures := 0
+	consecutiveWriteFailures := 0
+
 	if err := e.collectAndWrite(ctx); err != nil {
+		consecutiveWriteFailures++
 		logger.Warn("dcgm-init initial collection failed, will retry", logger.Fields{"error": err})
 	}
 
@@ -143,13 +204,33 @@ func (e *Engine) run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			if _, err := e.client.Reconcile(ctx); err != nil {
-				logger.Warn("dcgm-init client reconciliation failed", logger.Fields{"error": err})
+				consecutiveReconcileFailures++
+				logger.Warn("dcgm-init client reconciliation failed", logger.Fields{
+					"error":               err,
+					"consecutiveFailures": consecutiveReconcileFailures,
+				})
 				// Fall through and still write a status update so the shared
 				// file reflects the current (likely connection-lost) health
 				// with a fresh timestamp rather than silently going stale.
+				if consecutiveReconcileFailures >= maxConsecutiveFailures {
+					return fmt.Errorf("dcgm-init giving up after %d consecutive DCGM reconciliation failures: %w",
+						consecutiveReconcileFailures, err)
+				}
+			} else {
+				consecutiveReconcileFailures = 0
 			}
 			if err := e.collectAndWrite(ctx); err != nil {
-				logger.Warn("dcgm-init metrics collection failed", logger.Fields{"error": err})
+				consecutiveWriteFailures++
+				logger.Warn("dcgm-init metrics collection failed", logger.Fields{
+					"error":               err,
+					"consecutiveFailures": consecutiveWriteFailures,
+				})
+				if consecutiveWriteFailures >= maxConsecutiveFailures {
+					return fmt.Errorf("dcgm-init giving up after %d consecutive metrics write failures: %w",
+						consecutiveWriteFailures, err)
+				}
+			} else {
+				consecutiveWriteFailures = 0
 			}
 		}
 	}
@@ -170,6 +251,32 @@ type metricsOutput struct {
 	GPUs           []gputypes.GPUMetric `json:"gpus"`
 }
 
+// getMetrics calls the DCGM client's GetMetrics but honors ctx cancellation.
+// The client's GetMetrics performs synchronous cgo calls into nv-hostengine and
+// does not itself observe ctx, so a wedged nv-hostengine could otherwise block
+// the collection tick indefinitely and stall signal-driven shutdown. Running it
+// in a goroutine lets us return promptly on ctx.Done(); the goroutine (and the
+// blocked cgo call) is abandoned but the buffered channel ensures it does not
+// leak on the normal completion path.
+func (e *Engine) getMetrics(ctx context.Context) ([]gputypes.GPUMetric, error) {
+	type result struct {
+		metrics []gputypes.GPUMetric
+		err     error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		metrics, err := e.client.GetMetrics(ctx)
+		resCh <- result{metrics: metrics, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-resCh:
+		return res.metrics, res.err
+	}
+}
+
 // collectAndWrite pulls the latest metrics from the DCGM client and writes them
 // to the shared output file. The write is atomic: data is written to a staging
 // file and then renamed onto the final path so readers never observe a partially
@@ -180,8 +287,22 @@ type metricsOutput struct {
 // connection state so the shared file does not silently go stale. Only a marshal
 // or write/rename failure is returned as an error.
 func (e *Engine) collectAndWrite(ctx context.Context) error {
-	metrics, err := e.client.GetMetrics(ctx)
+	// Re-ensure the output directory on every collection: it is created once in
+	// Start(), but /var/run is tmpfs and the directory can be pruned at runtime
+	// (systemd-tmpfiles, a cleanup job). os.WriteFile does not recreate missing
+	// parents, so without this a deleted directory would freeze metrics forever.
+	if err := ensureOutputDir(); err != nil {
+		return err
+	}
+
+	metrics, err := e.getMetrics(ctx)
 	if err != nil {
+		// If the context was cancelled we are shutting down mid-collection; don't
+		// write a teardown snapshot, just unwind (the run loop will observe the
+		// cancellation and return).
+		if ctx.Err() != nil {
+			return nil
+		}
 		// Keep going with no per-GPU metrics; the health/connection fields below
 		// still convey the current state to the reader with a fresh timestamp.
 		logger.Warn("dcgm-init failed to collect GPU metrics, writing status only", logger.Fields{"error": err})
