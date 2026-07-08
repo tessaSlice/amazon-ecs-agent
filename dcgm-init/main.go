@@ -16,58 +16,80 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
 	"github.com/aws/amazon-ecs-agent/dcgm-init/version"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
-
 	"github.com/cihub/seelog"
 )
 
-// all supported commands
 const (
-	VERSION = "version"
 	START   = "start"
+	VERSION = "version"
 )
 
 func main() {
+	socketPath := flag.String("socket-path", dcgm.DefaultSocketPath, "Path to the DCGM nv-hostengine Unix domain socket")
+	outputPath := flag.String("output", engine.DefaultOutputPath, "Path to write GPU metrics JSON output")
+	collectionFreq := flag.Duration("interval", engine.DefaultCollectionFreq, "Metrics collection interval")
+	oneShot := flag.Bool("once", false, "Collect metrics once and exit")
 	flag.Parse()
-	args := flag.Args()
 
+	args := flag.Args()
 	if len(args) == 0 {
-		usage(actions(nil))
+		usage()
 		os.Exit(1)
 	}
 
 	logger.InitSeelog()
 	defer seelog.Flush()
+
+	logger.Info("dcgm-init invoked", logger.Fields{"command": args[0]})
+
+	// version short-circuits before creating the engine: it only prints build
+	// info and must not require a DCGM connection or any flags.
 	if args[0] == VERSION {
-		err := version.PrintVersion()
-		if err != nil {
-			seelog.Errorf("failed print version info, err: %v", err)
+		if err := version.PrintVersion(); err != nil {
+			logger.Error("failed to print version info", logger.Fields{"error": err})
+			seelog.Flush()
+			os.Exit(1)
 		}
 		return
 	}
 
-	init, err := engine.New()
-	if err != nil {
-		die(err, engine.DefaultInitErrorExitCode)
-	}
-	seelog.Info(args[0])
-	actions := actions(init)
+	eng := engine.New(*socketPath, *outputPath, *collectionFreq, *oneShot)
+	actions := actions(eng)
+
 	action, ok := actions[args[0]]
 	if !ok {
-		usage(actions)
+		usage()
+		// Flush explicitly: os.Exit skips the deferred seelog.Flush(), which
+		// would otherwise drop the buffered "dcgm-init invoked" log above.
+		seelog.Flush()
 		os.Exit(1)
 	}
-	err = action.function()
 
-	if err != nil {
-		die(err, engine.DefaultInitErrorExitCode)
+	if err := action.function(); err != nil {
+		die(err, exitCodeFor(err))
 	}
+}
+
+// exitCodeFor maps an action error to a process exit code. A *engine.TerminalError
+// (an unrecoverable failure) maps to engine.TerminalFailureExitCode so the
+// systemd unit's RestartPreventExitStatus=5 stops it from restart-looping;
+// everything else maps to engine.DefaultErrorExitCode, which Restart=on-failure
+// will retry.
+func exitCodeFor(err error) int {
+	var terminalErr *engine.TerminalError
+	if errors.As(err, &terminalErr) {
+		return engine.TerminalFailureExitCode
+	}
+	return engine.DefaultErrorExitCode
 }
 
 type action struct {
@@ -75,27 +97,29 @@ type action struct {
 	description string
 }
 
-func actions(engine *engine.Engine) map[string]action {
+func actions(eng *engine.Engine) map[string]action {
 	return map[string]action{
-		START: action{
-			function:    engine.Start,
+		START: {
+			function:    eng.Start,
 			description: "Start collecting GPU metrics",
 		},
 	}
 }
 
-func usage(actions map[string]action) {
-	fmt.Printf("Usage: %s ACTION\n", os.Args[0])
-	fmt.Println("")
-	fmt.Println(" Available actions:")
-	for command, action := range actions {
-		fmt.Printf("  %-15s  %s\n", command, action.description)
+func usage() {
+	fmt.Fprintf(os.Stderr, "Usage: %s [flags] COMMAND\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, " Available commands:\n")
+	for cmd, a := range actions(nil) {
+		fmt.Fprintf(os.Stderr, "  %-10s  %s\n", cmd, a.description)
 	}
-	fmt.Println("")
+	// version is handled outside the actions map because it needs no engine.
+	fmt.Fprintf(os.Stderr, "  %-10s  %s\n", VERSION, "Print the dcgm-init version and exit")
+	fmt.Fprintf(os.Stderr, "\n")
 }
 
 func die(err error, exitCode int) {
-	seelog.Error(err.Error())
+	logger.Error("dcgm-init failed", logger.Fields{"error": err, "exitCode": exitCode})
 	seelog.Flush()
 	os.Exit(exitCode)
 }
