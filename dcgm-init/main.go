@@ -22,20 +22,20 @@ import (
 	"os"
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
+	"github.com/aws/amazon-ecs-agent/dcgm-init/version"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu/dcgm"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 	"github.com/cihub/seelog"
 )
 
 const (
-	START = "start"
-	STOP  = "stop"
+	START   = "start"
+	VERSION = "version"
 )
 
 func main() {
 	socketPath := flag.String("socket-path", dcgm.DefaultSocketPath, "Path to the DCGM nv-hostengine Unix domain socket")
 	outputPath := flag.String("output", engine.DefaultOutputPath, "Path to write GPU metrics JSON output")
-	pidPath := flag.String("pidfile", engine.DefaultPidFilePath, "Path to the pid file used to locate the running process on stop")
 	collectionFreq := flag.Duration("interval", engine.DefaultCollectionFreq, "Metrics collection interval")
 	oneShot := flag.Bool("once", false, "Collect metrics once and exit")
 	flag.Parse()
@@ -51,7 +51,18 @@ func main() {
 
 	logger.Info("dcgm-init invoked", logger.Fields{"command": args[0]})
 
-	eng := engine.New(*socketPath, *outputPath, *pidPath, *collectionFreq, *oneShot)
+	// version short-circuits before creating the engine: it only prints build
+	// info and must not require a DCGM connection or any flags.
+	if args[0] == VERSION {
+		if err := version.PrintVersion(); err != nil {
+			logger.Error("failed to print version info", logger.Fields{"error": err})
+			seelog.Flush()
+			os.Exit(1)
+		}
+		return
+	}
+
+	eng := engine.New(*socketPath, *outputPath, *collectionFreq, *oneShot)
 	actions := actions(eng)
 
 	action, ok := actions[args[0]]
@@ -92,10 +103,6 @@ func actions(eng *engine.Engine) map[string]action {
 			function:    eng.Start,
 			description: "Start collecting GPU metrics",
 		},
-		STOP: {
-			function:    eng.Stop,
-			description: "Stop collecting GPU metrics (handled by SIGTERM)",
-		},
 	}
 }
 
@@ -106,6 +113,8 @@ func usage() {
 	for cmd, a := range actions(nil) {
 		fmt.Fprintf(os.Stderr, "  %-10s  %s\n", cmd, a.description)
 	}
+	// version is handled outside the actions map because it needs no engine.
+	fmt.Fprintf(os.Stderr, "  %-10s  %s\n", VERSION, "Print the dcgm-init version and exit")
 	fmt.Fprintf(os.Stderr, "\n")
 }
 
