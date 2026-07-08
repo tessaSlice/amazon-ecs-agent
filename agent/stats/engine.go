@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -128,10 +127,6 @@ type DockerStatsEngine struct {
 	// currentGPUMetrics holds the GPU metrics for the current publish tick,
 	// read once and shared between instance-level and container-level emission.
 	currentGPUMetrics []gpu.GPUMetric
-	// ec2InstanceID is the EC2 instance ID of this host, used to scope
-	// instance-level GPU metrics per instance in CloudWatch. It is set via
-	// SetEC2InstanceID after MustInit and may be empty (e.g. non-EC2 hosts).
-	ec2InstanceID string
 }
 
 // ResolveTask resolves the api task object, given container id.
@@ -1004,17 +999,6 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 	return containerMetrics, nil
 }
 
-// SetEC2InstanceID records the EC2 instance ID for this host so that
-// instance-level GPU metrics can be dimensioned per instance
-// (ContainerInstanceId/EC2InstanceId) in CloudWatch. It may be called with an
-// empty string on non-EC2 hosts, in which case the EC2InstanceId dimension is
-// omitted by the conversion layer.
-func (engine *DockerStatsEngine) SetEC2InstanceID(ec2InstanceID string) {
-	engine.lock.Lock()
-	defer engine.lock.Unlock()
-	engine.ec2InstanceID = ec2InstanceID
-}
-
 // snapshotGPUMetrics advances the per-tick GPU state and returns a stable
 // snapshot of the current metrics. It reads dcgm-init's metrics at most once
 // every 3 ticks (~60s), updating the shared engine.currentGPUMetrics/
@@ -1039,10 +1023,17 @@ func (engine *DockerStatsEngine) snapshotGPUMetrics() ([]gpu.GPUMetric, string) 
 
 // instanceGPUPayload returns the instance-level GPU telemetry payload built from
 // the given per-tick GPU metrics snapshot, or nil if there are none. It reads
-// engine.tasksToContainers (and containerInstanceArn/ec2InstanceID) under
-// engine.lock, but uses the caller-provided snapshot for the GPU metrics so it
-// stays consistent with the container-level emission from the same tick and
-// cannot be nilled by a concurrent publishMetrics tick.
+// engine.tasksToContainers under engine.lock, but uses the caller-provided
+// snapshot for the GPU metrics so it stays consistent with the container-level
+// emission from the same tick and cannot be nilled by a concurrent
+// publishMetrics tick.
+//
+// The payload is emitted without any wrapper dimensions: the TACS backend stamps
+// the instance-scoping dimensions (ClusterName / CapacityProviderName /
+// ContainerInstanceId / EC2InstanceId) onto the instance metric itself. Attaching
+// them here caused the backend's dimension-set filter to drop the wrapper on
+// direct EC2 launches (no CapacityProviderName), so the metrics never reached
+// CloudWatch.
 func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gpu.GPUMetric) []*ecstcs.GeneralMetricsWrapper {
 	if len(gpuMetrics) == 0 {
 		return nil
@@ -1051,26 +1042,9 @@ func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gpu.GPUMetric) 
 	defer engine.lock.Unlock()
 
 	usageTotal := engine.computeGPUUsageTotalUnsafe()
-	containerInstanceID := arnToContainerInstanceID(engine.containerInstanceArn)
-	// Log the dimensions stamped onto the instance-level payload. These
-	// (ContainerInstanceId/EC2InstanceId) determine which CloudWatch metric
-	// stream the values land in; empty values are dropped by the conversion
-	// layer, so surfacing them here makes a missing-dimension misconfiguration
-	// visible in the agent log.
-	seelog.Infof("Building instance GPU payload: gpuCount=%d, usageTotal=%d, containerInstanceId=%q, ec2InstanceId=%q",
-		len(gpuMetrics), usageTotal, containerInstanceID, engine.ec2InstanceID)
-	return gpuconvert.GPUMetricsToInstancePayload(gpuMetrics, usageTotal, containerInstanceID, engine.ec2InstanceID)
-}
-
-// arnToContainerInstanceID extracts the container instance ID (the resource ID
-// after the final "/") from a container instance ARN so instance-level GPU
-// metrics are dimensioned by the short ID in CloudWatch rather than the full
-// ARN. A value with no "/" (e.g. already an ID, or empty) is returned as-is.
-func arnToContainerInstanceID(containerInstanceArn string) string {
-	if idx := strings.LastIndex(containerInstanceArn, "/"); idx >= 0 {
-		return containerInstanceArn[idx+1:]
-	}
-	return containerInstanceArn
+	seelog.Infof("Building instance GPU payload: gpuCount=%d, usageTotal=%d",
+		len(gpuMetrics), usageTotal)
+	return gpuconvert.GPUMetricsToInstancePayload(gpuMetrics, usageTotal)
 }
 
 // computeGPUUsageTotalUnsafe counts the total number of unique GPU device IDs

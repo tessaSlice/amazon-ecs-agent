@@ -25,7 +25,7 @@ type GPUMetric = gputypes.GPUMetric
 
 // GPUMetricsToInstancePayload is a no-op on non-linux platforms, where GPU
 // metrics are not collected.
-func GPUMetricsToInstancePayload(_ []GPUMetric, _ int64, _, _ string) []*ecstcs.GeneralMetricsWrapper {
+func GPUMetricsToInstancePayload(_ []GPUMetric, _ int64) []*ecstcs.GeneralMetricsWrapper {
 	return nil
 }
 

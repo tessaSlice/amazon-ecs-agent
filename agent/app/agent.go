@@ -1016,9 +1016,6 @@ func (agent *ecsAgent) startAsyncRoutines(
 		seelog.Warnf("Error initializing metrics engine: %v", err)
 		return
 	}
-	// Provide the EC2 instance ID so instance-level GPU metrics can be dimensioned
-	// per instance (ContainerInstanceId/EC2InstanceId) in CloudWatch.
-	statsEngine.SetEC2InstanceID(ec2InstanceID)
 	go statsEngine.StartMetricsPublish()
 
 	session, err := reporter.NewDockerTelemetrySession(agent.containerInstanceARN, agent.credentialsCache, agent.cfg, deregisterInstanceEventStream,
