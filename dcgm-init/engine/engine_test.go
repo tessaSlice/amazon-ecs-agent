@@ -596,6 +596,13 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 
 		eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
 
+		// Pin umask to 0 for this subtest so the on-disk modes below reflect the
+		// permissions Start() requests (0755 dir, 0644 file) rather than the
+		// environment's umask. Safe because the SIGTERM-driven tests are serial
+		// (never t.Parallel), so no other test observes the changed umask.
+		oldUmask := syscall.Umask(0)
+		defer syscall.Umask(oldUmask)
+
 		// Buffered so Start()'s final send never blocks, even with no reader.
 		done := make(chan error, 1)
 		go func() { done <- eng.Start() }()
@@ -643,12 +650,19 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 		info, err := os.Stat(metricsDir)
 		require.NoError(t, err, "Start() should have created the missing metrics directory")
 		assert.True(t, info.IsDir(), "created metrics path should be a directory")
+		// The agent (a separate, potentially non-root reader) must be able to
+		// traverse the dir, so it must be created world-traversable (0755). Assert
+		// the literal, not metricsDirPermission, so a regression to the const is
+		// actually caught (comparing against the const would move with the change).
+		assert.Equal(t, os.FileMode(0755), info.Mode().Perm(), "metrics directory mode")
 
-		// Mark that the process-wide SIGTERM has been sent before sending it, so the
+		// Send the process-wide SIGTERM, then record that it was sent so the
 		// deferred teardown never sends a second one (which could hit the default
-		// disposition after Start() uninstalls its handler and kill the test binary).
-		signaled = true
+		// disposition after Start() uninstalls its handler and kill the test
+		// binary). Setting the flag only after a successful Kill means that if Kill
+		// somehow fails, the teardown can still signal to reap the Start() goroutine.
 		require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
+		signaled = true
 		select {
 		case err := <-done:
 			startReturned = true
@@ -664,6 +678,12 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 		out := readOutput(t, outputPath)
 		require.Len(t, out.GPUs, 1)
 		assert.Equal(t, "GPU-mkdir-001", out.GPUs[0].GPUUUID)
+		// The metrics file must be world-readable (0644) so the agent can consume
+		// it. Assert the literal, not metricsFilePermission, so a regression to the
+		// const is actually caught.
+		fileInfo, err := os.Stat(outputPath)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0644), fileInfo.Mode().Perm(), "metrics file mode")
 		_, err = os.Stat(outputPath + metricsFileTempSuffix)
 		assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
 	})
