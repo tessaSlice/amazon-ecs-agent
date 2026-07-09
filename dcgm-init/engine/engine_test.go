@@ -102,9 +102,9 @@ func TestNewEngine(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, eng)
 			assert.NotNil(t, eng.client)
-			assert.Equal(t, MetricsFilePath, eng.outputPath)
+			assert.Equal(t, gputypes.GPUMetricsFilePath, eng.outputPath)
 			assert.Equal(t, metricsCollectionInterval, eng.collectionInterval)
-			assert.Equal(t, MetricsFilePath+".tmp", eng.tempPath())
+			assert.Equal(t, gputypes.GPUMetricsFilePath+".tmp", eng.tempPath())
 		})
 	}
 }
@@ -565,4 +565,90 @@ func TestStartGPUSupportGate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStartCreatesMetricsDirectory verifies Start() provisions the metrics
+// directory on demand. The metrics file lives on tmpfs (/var/run/ecs), which is
+// recreated empty on every boot, so Start() must MkdirAll the parent before
+// writing; a parent that cannot be created is a fast failure before the client
+// is touched.
+func TestStartCreatesMetricsDirectory(t *testing.T) {
+	t.Run("missing directory is created", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		// outputPath sits under a nested directory that does not exist yet, so
+		// Start() must create the parent chain before it can create the file.
+		metricsDir := filepath.Join(t.TempDir(), "run", "ecs")
+		outputPath := filepath.Join(metricsDir, "gpu-metrics.json")
+		_, statErr := os.Stat(metricsDir)
+		require.True(t, os.IsNotExist(statErr), "test precondition: metrics dir must not exist yet")
+
+		var getMetricsCalls atomic.Int64
+		mockClient := mock_dcgm.NewMockClient(ctrl)
+		mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
+		mockClient.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+			getMetricsCalls.Add(1)
+			return []gputypes.GPUMetric{{GPUUUID: "GPU-mkdir-001"}}, nil
+		}).AnyTimes()
+		expectStatus(mockClient, true, "", false)
+		mockClient.EXPECT().Shutdown().Return(nil).Times(1)
+
+		eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
+
+		// Buffered so Start()'s final send never blocks, even with no reader.
+		done := make(chan error, 1)
+		go func() { done <- eng.Start() }()
+
+		// Bounded join so a hung Start() is reported rather than blocking teardown.
+		startReturned := false
+		defer func() {
+			if startReturned {
+				return
+			}
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Error("Start() goroutine leaked: did not exit after SIGTERM")
+			}
+		}()
+
+		// Once collection begins, the directory Start() created must exist.
+		require.Eventually(t, func() bool {
+			return getMetricsCalls.Load() >= 1
+		}, 2*time.Second, 5*time.Millisecond, "Start() should create the dir and begin collecting")
+		info, err := os.Stat(metricsDir)
+		require.NoError(t, err, "Start() should have created the missing metrics directory")
+		assert.True(t, info.IsDir(), "created metrics path should be a directory")
+
+		require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
+		select {
+		case err := <-done:
+			startReturned = true
+			assert.NoError(t, err, "Start() should return nil after SIGTERM cancels the run loop")
+		case <-time.After(2 * time.Second):
+			t.Fatal("Start() did not return after SIGTERM was delivered")
+		}
+	})
+
+	t.Run("uncreatable directory fails fast", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		// Make a parent path component a regular file so MkdirAll cannot create the
+		// directory beneath it (ENOTDIR). This failure is independent of uid, so it
+		// need not be skipped when running as root.
+		blocker := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(blocker, nil, metricsFilePermission))
+		outputPath := filepath.Join(blocker, "gpu-metrics.json")
+
+		// On the failure path the client must never be touched: no expectations are
+		// set, so any Reconcile/GetMetrics/Shutdown call fails the test.
+		mockClient := mock_dcgm.NewMockClient(ctrl)
+		eng := newTestEngine(mockClient, outputPath, time.Hour)
+
+		err := eng.Start()
+		require.Error(t, err, "Start() should fail when the metrics directory cannot be created")
+		assert.Contains(t, err.Error(), "cannot create metrics directory")
+	})
 }

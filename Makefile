@@ -191,6 +191,15 @@ test-init:
 		./... && cd ..
 	cd ecs-init && go tool cover -func ../cover.out > ../coverprofile-init.out && cd ..
 
+# dcgm-init is built with CGO enabled because it binds to the NVIDIA go-dcgm
+# library. The linker flag ignores unresolved symbols so the binary links
+# against the DCGM shared library present on GPU hosts at runtime rather than
+# at build time.
+.PHONY: build-dcgm-init test-dcgm-init
+build-dcgm-init:
+	cd dcgm-init && CGO_ENABLED=1 CGO_LDFLAGS="-Wl,--unresolved-symbols=ignore-in-object-files" \
+		go build -mod=vendor -ldflags "-s" -o ../amazon-dcgm-init .
+
 test-dcgm-init:
 	cd dcgm-init && GO111MODULE=on ${GOTEST} ${VERBOSE} -tags unit -mod vendor \
 		-coverprofile ../cover.out \
@@ -458,7 +467,8 @@ amazon-linux-sources.tgz:
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.conf amazon-ecs-volume-plugin.conf
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.service amazon-ecs-volume-plugin.service
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.socket amazon-ecs-volume-plugin.socket
-	tar -czf ./sources.tgz ecs-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION RELEASE_COMMIT
+	cp packaging/amazon-linux-ami-integrated/dcgm-init.service dcgm-init.service
+	tar -czf ./sources.tgz ecs-init dcgm-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION RELEASE_COMMIT
 
 .amazon-linux-rpm-integrated-done: amazon-linux-sources.tgz
 	test -e SOURCES || ln -s . SOURCES
@@ -477,7 +487,8 @@ amazon-linux-rpm-integrated: .amazon-linux-rpm-integrated-done
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.conf amazon-ecs-volume-plugin.conf
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.service amazon-ecs-volume-plugin.service
 	cp packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.socket amazon-ecs-volume-plugin.socket
-	tar -czf ./sources.tgz ecs-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
+	cp packaging/amazon-linux-ami-integrated/dcgm-init.service dcgm-init.service
+	tar -czf ./sources.tgz ecs-init dcgm-init scripts misc agent amazon-ecs-cni-plugins amazon-vpc-cni-plugins agent-container Makefile VERSION GO_VERSION
 	test -e SOURCES || ln -s . SOURCES
 	rpmbuild --define "%_topdir $(PWD)" -bb ecs-agent.spec
 	find RPMS/ -type f -exec cp {} . \;
@@ -538,6 +549,7 @@ clean:
 	-rm -rf coverprofile.out
 	-rm -rf coverprofile-init.out
 	-rm -rf coverprofile-ecs-agent.out
+	-rm -rf coverprofile-dcgm-init.out
 	# ecs-init & rpm cleanup
 	-rm -f ecs-init.spec
 	-rm -f amazon-ecs-init.spec
@@ -549,6 +561,8 @@ clean:
 	-rm -rf ./bin
 	-rm -f ./sources.tgz
 	-rm -f ./amazon-ecs-init
+	-rm -f ./amazon-dcgm-init
+	-rm -f ./dcgm-init.service
 	-rm -f ./ecs-init/ecs-init
 	-rm -f ./amazon-ecs-init-*.rpm
 	-rm -f ./ecs-agent-*.tar
