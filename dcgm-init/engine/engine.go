@@ -80,7 +80,7 @@ func New() (*Engine, error) {
 	}, nil
 }
 
-// tempPath is the staging file that collectAndWrite writes before atomically
+// tempPath is the staging file that reconcileAndCollect writes before atomically
 // renaming it onto outputPath.
 func (e *Engine) tempPath() string {
 	return e.outputPath + ".tmp"
@@ -134,19 +134,13 @@ func (e *Engine) run(ctx context.Context) error {
 	ticker := time.NewTicker(e.collectionInterval)
 	defer ticker.Stop()
 
-	// Collect once up front so the file is populated without waiting a full
-	// interval. A failure here is not fatal; the ticker will retry.
-	if err := e.collectAndWrite(ctx); err != nil {
-		logger.Warn("dcgm-init initial metrics collection failed, will retry", logger.Fields{"error": err})
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("dcgm-init is shutting down metrics collection")
 			return nil
 		case <-ticker.C:
-			if err := e.collectAndWrite(ctx); err != nil {
+			if err := e.reconcileAndCollect(ctx); err != nil {
 				logger.Warn("dcgm-init metrics collection failed", logger.Fields{"error": err})
 			}
 		}
@@ -168,7 +162,7 @@ type dcgmOutput struct {
 	GPUs           []gputypes.GPUMetric `json:"gpus"`
 }
 
-// collectAndWrite reconciles the DCGM connection, pulls the latest metrics from
+// reconcileAndCollect reconciles the DCGM connection, pulls the latest metrics from
 // the client, and writes them to the shared output file atomically: it stages
 // the data into the temp file and then renames it onto the final path so a
 // reader (the agent) never observes a partially written file.
@@ -177,7 +171,7 @@ type dcgmOutput struct {
 // snapshot reflecting the current health and connection state so the shared
 // file does not silently go stale. Only a marshal or write/rename failure is
 // returned as an error.
-func (e *Engine) collectAndWrite(ctx context.Context) error {
+func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 	if _, err := e.client.Reconcile(ctx); err != nil {
 		logger.Warn("dcgm-init DCGM reconciliation failed, skipping metrics collection", logger.Fields{"error": err})
 		return nil
@@ -197,6 +191,7 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 		ConnectionLost:  e.client.IsConnectionLost(),
 		GPUs:            metrics,
 	}
+	logger.Debug("dcgm-init collected GPU metrics", logger.Fields{"path": e.outputPath, "gpuCount": len(output.GPUs)})
 
 	data, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
@@ -214,7 +209,7 @@ func (e *Engine) collectAndWrite(ctx context.Context) error {
 		return fmt.Errorf("failed to rename %s to %s: %w", tempPath, e.outputPath, err)
 	}
 
-	logger.Debug("metrics written", logger.Fields{"path": e.outputPath, "gpuCount": len(output.GPUs)})
+	logger.Debug("dcgm-init wrote GPU metrics")
 	return nil
 }
 

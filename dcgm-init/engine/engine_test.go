@@ -18,6 +18,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -44,8 +45,9 @@ func newTestEngine(client *mock_dcgm.MockClient, outputPath string, collectionIn
 	}
 }
 
-// expectStatus sets up the health-reporting expectations every collectAndWrite
-// invokes. Values are asserted through the written file, not here.
+// expectStatus stubs the health-reporting methods every reconcileAndCollect
+// invokes once it gets past reconciliation. Values are asserted through the
+// written file, not here.
 func expectStatus(m *mock_dcgm.MockClient, healthy bool, reason string, connLost bool) {
 	m.EXPECT().IsHealthy().Return(healthy).AnyTimes()
 	m.EXPECT().UnhealthyReason().Return(reason).AnyTimes()
@@ -62,54 +64,74 @@ func readOutput(t *testing.T, path string) dcgmOutput {
 	return out
 }
 
-// TestNew verifies New() constructs an Engine with a live client and the
-// production defaults for the output path and collection interval.
-func TestNew(t *testing.T) {
+func TestNewEngine(t *testing.T) {
 	t.Parallel()
-
-	eng, err := New()
-	require.NoError(t, err)
-	require.NotNil(t, eng)
-
-	assert.NotNil(t, eng.client, "New() should create a DCGM client")
-	assert.Equal(t, MetricsFilePath, eng.outputPath)
-	assert.Equal(t, metricsCollectionInterval, eng.collectionInterval)
-	assert.Equal(t, MetricsFilePath+".tmp", eng.tempPath(), "temp path should be the output path plus .tmp")
-}
-
-// TestCollectAndWrite drives collectAndWrite through the same decision points as
-// the reference collector's ReconcileAndCollect test, adapted for a file sink:
-// a reconcile failure short-circuits before GetMetrics and writes nothing, while
-// every path past reconciliation writes a status snapshot (with or without
-// per-GPU metrics) that we read back from disk.
-func TestCollectAndWrite(t *testing.T) {
-	t.Parallel()
-
-	utilization := 75.0
 
 	testCases := []struct {
-		name        string
-		setupMock   func(*mock_dcgm.MockClient)
-		wantWritten bool
-		verify      func(t *testing.T, out dcgmOutput)
+		name string
+	}{
+		{"creates Engine with correct fields"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			eng, err := New()
+
+			require.NoError(t, err)
+			require.NotNil(t, eng)
+			assert.NotNil(t, eng.client)
+			assert.Equal(t, MetricsFilePath, eng.outputPath)
+			assert.Equal(t, metricsCollectionInterval, eng.collectionInterval)
+			assert.Equal(t, MetricsFilePath+".tmp", eng.tempPath())
+		})
+	}
+}
+
+func TestEngine_ReconcileAndCollect(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name             string
+		setupMock        func(*mock_dcgm.MockClient, *atomic.Int64, *atomic.Int64)
+		expectGetMetrics bool
+		expectWrite      bool
+		verify           func(t *testing.T, out dcgmOutput)
 	}{
 		{
-			name: "reconcile failure skips GetMetrics and writes nothing",
-			setupMock: func(m *mock_dcgm.MockClient) {
-				m.EXPECT().Reconcile(gomock.Any()).Return(false, assert.AnError).AnyTimes()
-				// GetMetrics must not be reached when reconciliation fails.
-				m.EXPECT().GetMetrics(gomock.Any()).Times(0)
+			name: "reconcile failure skips GetMetrics",
+			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
+				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
+					reconciles.Add(1)
+					return false, errors.New("connection failed")
+				}).AnyTimes()
+				m.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+					getMetrics.Add(1)
+					return nil, nil
+				}).AnyTimes()
 			},
-			wantWritten: false,
+			expectGetMetrics: false,
+			expectWrite:      false,
 		},
 		{
-			name: "GetMetrics failure writes status only",
-			setupMock: func(m *mock_dcgm.MockClient) {
-				m.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
-				m.EXPECT().GetMetrics(gomock.Any()).Return(nil, assert.AnError).AnyTimes()
+			name: "GetMetrics failure skips file write of metrics",
+			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
+				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
+					reconciles.Add(1)
+					return true, nil
+				}).AnyTimes()
+				m.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+					getMetrics.Add(1)
+					return nil, errors.New("metrics unavailable")
+				}).AnyTimes()
 				expectStatus(m, true, "", true)
 			},
-			wantWritten: true,
+			expectGetMetrics: true,
+			// A GetMetrics failure is non-fatal: a status snapshot with no per-GPU
+			// metrics is still written (the file-sink analog of the reference's
+			// "status only, no SetGPUMetrics").
+			expectWrite: true,
 			verify: func(t *testing.T, out dcgmOutput) {
 				assert.NotEmpty(t, out.Timestamp, "status file should carry a fresh timestamp")
 				assert.True(t, out.ConnectionLost, "status file should reflect connection lost")
@@ -118,14 +140,22 @@ func TestCollectAndWrite(t *testing.T) {
 		},
 		{
 			name: "successful collection writes metrics to file",
-			setupMock: func(m *mock_dcgm.MockClient) {
-				m.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
-				m.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
-					{GPUUUID: "GPU-test-uuid-1", GPUUtilization: &utilization},
-				}, nil).AnyTimes()
+			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
+				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
+					reconciles.Add(1)
+					return true, nil
+				}).AnyTimes()
+				utilization := 75.0
+				m.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+					getMetrics.Add(1)
+					return []gputypes.GPUMetric{
+						{GPUUUID: "GPU-test-uuid-1", GPUUtilization: &utilization},
+					}, nil
+				}).AnyTimes()
 				expectStatus(m, true, "", false)
 			},
-			wantWritten: true,
+			expectGetMetrics: true,
+			expectWrite:      true,
 			verify: func(t *testing.T, out dcgmOutput) {
 				assert.True(t, out.Healthy)
 				assert.Empty(t, out.UnhealthyReason)
@@ -133,19 +163,24 @@ func TestCollectAndWrite(t *testing.T) {
 				require.Len(t, out.GPUs, 1)
 				assert.Equal(t, "GPU-test-uuid-1", out.GPUs[0].GPUUUID)
 				require.NotNil(t, out.GPUs[0].GPUUtilization)
-				assert.Equal(t, utilization, *out.GPUs[0].GPUUtilization)
+				assert.Equal(t, 75.0, *out.GPUs[0].GPUUtilization)
 			},
 		},
 		{
 			name: "unhealthy GPU records the XID reason",
-			setupMock: func(m *mock_dcgm.MockClient) {
-				m.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
-				m.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
-					{GPUUUID: "GPU-unhealthy-001"},
-				}, nil).AnyTimes()
+			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
+				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
+					reconciles.Add(1)
+					return true, nil
+				}).AnyTimes()
+				m.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+					getMetrics.Add(1)
+					return []gputypes.GPUMetric{{GPUUUID: "GPU-unhealthy-001"}}, nil
+				}).AnyTimes()
 				expectStatus(m, false, "XID_48", false)
 			},
-			wantWritten: true,
+			expectGetMetrics: true,
+			expectWrite:      true,
 			verify: func(t *testing.T, out dcgmOutput) {
 				assert.False(t, out.Healthy, "unhealthy GPU should report healthy=false")
 				assert.Equal(t, "XID_48", out.UnhealthyReason, "should report the XID error code")
@@ -162,92 +197,105 @@ func TestCollectAndWrite(t *testing.T) {
 
 			outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
 
+			var reconcileCalls, getMetricsCalls atomic.Int64
 			mockClient := mock_dcgm.NewMockClient(ctrl)
-			tc.setupMock(mockClient)
+			tc.setupMock(mockClient, &reconcileCalls, &getMetricsCalls)
 
 			eng := newTestEngine(mockClient, outputPath, time.Hour)
 
-			require.NoError(t, eng.collectAndWrite(context.Background()))
+			// Call reconcileAndCollect directly (no need to run the loop since we
+			// are not exercising the ticker here).
+			require.NoError(t, eng.reconcileAndCollect(context.Background()))
 
-			if !tc.wantWritten {
-				_, err := os.Stat(outputPath)
-				assert.True(t, os.IsNotExist(err), "no file should be written when reconciliation fails")
-				return
+			// Verify GetMetrics was called (or not) based on the Reconcile outcome.
+			if tc.expectGetMetrics {
+				assert.GreaterOrEqual(t, getMetricsCalls.Load(), int64(1),
+					"GetMetrics should have been called")
+			} else {
+				assert.Equal(t, int64(0), getMetricsCalls.Load(),
+					"GetMetrics should not have been called")
 			}
 
-			// The temp file must have been renamed away, leaving only the final file.
-			_, err := os.Stat(eng.tempPath())
-			assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
+			// Verify Reconcile was always called.
+			assert.GreaterOrEqual(t, reconcileCalls.Load(), int64(1),
+				"Reconcile should always be called")
 
-			if tc.verify != nil {
-				tc.verify(t, readOutput(t, outputPath))
+			// Verify the metrics were written to the file (the file-sink analog of
+			// the reference draining the MetricsDirector mailbox).
+			if tc.expectWrite {
+				// The staging temp file must have been renamed away.
+				_, err := os.Stat(eng.tempPath())
+				assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
+				if tc.verify != nil {
+					tc.verify(t, readOutput(t, outputPath))
+				}
+			} else {
+				// Verify nothing was written.
+				_, err := os.Stat(outputPath)
+				assert.True(t, os.IsNotExist(err), "no file should be written when reconciliation fails")
 			}
 		})
 	}
 }
 
-// TestRun covers the collection loop the way the reference's PeriodicCollection
-// test does: the ticker drives repeated collections, and cancelling the context
-// stops the loop cleanly (Start relies on this for signal-driven shutdown).
-func TestRun(t *testing.T) {
+func TestEngine_PeriodicCollection(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
 		name     string
-		testFunc func(t *testing.T, eng *Engine, mockClient *mock_dcgm.MockClient, getMetricsCalls *atomic.Int64)
+		testFunc func(
+			t *testing.T,
+			eng *Engine,
+			mockClient *mock_dcgm.MockClient,
+			reconcileCalls *atomic.Int64,
+			getMetricsCalls *atomic.Int64,
+			cancel context.CancelFunc,
+		)
 	}{
 		{
-			name: "ticker triggers repeated collection",
-			testFunc: func(t *testing.T, eng *Engine, mockClient *mock_dcgm.MockClient, getMetricsCalls *atomic.Int64) {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-
-				done := make(chan error, 1)
-				go func() { done <- eng.run(ctx) }()
-
-				// run() collects once immediately, then once per tick. Waiting for
-				// >=2 collections proves the ticker (not just the initial call)
-				// fired.
-				require.Eventually(t, func() bool {
-					return getMetricsCalls.Load() >= 2
-				}, 2*time.Second, 5*time.Millisecond, "ticker should drive more than the initial collection")
-
-				cancel()
-				select {
-				case err := <-done:
-					assert.NoError(t, err, "run() should return nil when the context is cancelled")
-				case <-time.After(2 * time.Second):
-					t.Fatal("run() did not return after context cancellation")
-				}
+			name: "ticker triggers collection",
+			testFunc: func(
+				t *testing.T,
+				eng *Engine,
+				mockClient *mock_dcgm.MockClient,
+				reconcileCalls *atomic.Int64,
+				getMetricsCalls *atomic.Int64,
+				cancel context.CancelFunc,
+			) {
+				// Wait for at least one collection tick.
+				assert.Eventually(t, func() bool {
+					return getMetricsCalls.Load() >= 1
+				}, 200*time.Millisecond, 5*time.Millisecond,
+					"Expected at least one GetMetrics call from ticker")
 			},
 		},
 		{
 			name: "context cancellation stops the loop",
-			testFunc: func(t *testing.T, eng *Engine, mockClient *mock_dcgm.MockClient, getMetricsCalls *atomic.Int64) {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
+			testFunc: func(
+				t *testing.T,
+				eng *Engine,
+				mockClient *mock_dcgm.MockClient,
+				reconcileCalls *atomic.Int64,
+				getMetricsCalls *atomic.Int64,
+				cancel context.CancelFunc,
+			) {
+				// Wait for at least one tick to confirm the loop is running.
+				assert.Eventually(t, func() bool {
+					return reconcileCalls.Load() >= 1
+				}, 200*time.Millisecond, 5*time.Millisecond,
+					"Expected at least one Reconcile call")
 
-				done := make(chan error, 1)
-				go func() { done <- eng.run(ctx) }()
-
-				// Confirm the loop is running before cancelling.
-				require.Eventually(t, func() bool {
-					return getMetricsCalls.Load() >= 1
-				}, 2*time.Second, 5*time.Millisecond, "loop should collect at least once before cancellation")
-
+				// Cancel the context to stop the loop.
 				cancel()
-				select {
-				case err := <-done:
-					require.NoError(t, err)
-				case <-time.After(2 * time.Second):
-					t.Fatal("run() did not return after context cancellation")
-				}
 
-				// No collection should happen once the loop has returned.
-				countAfterStop := getMetricsCalls.Load()
+				// Record the call count after cancellation.
 				time.Sleep(50 * time.Millisecond)
-				assert.Equal(t, countAfterStop, getMetricsCalls.Load(),
-					"no further collections should happen after the loop stops")
+				countAfterCancel := reconcileCalls.Load()
+
+				// Verify no more calls happen after cancellation.
+				time.Sleep(50 * time.Millisecond)
+				assert.Equal(t, countAfterCancel, reconcileCalls.Load(),
+					"No more Reconcile calls should happen after context cancellation")
 			},
 		},
 	}
@@ -259,22 +307,39 @@ func TestRun(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
 			outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
 
-			var getMetricsCalls atomic.Int64
+			var reconcileCalls, getMetricsCalls atomic.Int64
 			mockClient := mock_dcgm.NewMockClient(ctrl)
-			mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
-			mockClient.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(
-				func(context.Context) ([]gputypes.GPUMetric, error) {
-					getMetricsCalls.Add(1)
-					return []gputypes.GPUMetric{{GPUUUID: "GPU-tick-1"}}, nil
-				}).AnyTimes()
+			mockClient.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
+				reconcileCalls.Add(1)
+				return true, nil
+			}).AnyTimes()
+			mockClient.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+				getMetricsCalls.Add(1)
+				return []gputypes.GPUMetric{{GPUUUID: "GPU-tick-1"}}, nil
+			}).AnyTimes()
 			expectStatus(mockClient, true, "", false)
 
 			// Short interval so the ticker fires many times within the test window.
 			eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
 
-			tc.testFunc(t, eng, mockClient, &getMetricsCalls)
+			done := make(chan error, 1)
+			go func() { done <- eng.run(ctx) }()
+
+			tc.testFunc(t, eng, mockClient, &reconcileCalls, &getMetricsCalls, cancel)
+
+			// Cancel (idempotent) and confirm the loop returns cleanly.
+			cancel()
+			select {
+			case err := <-done:
+				assert.NoError(t, err, "run() should return nil when the context is cancelled")
+			case <-time.After(2 * time.Second):
+				t.Fatal("run() did not return after context cancellation")
+			}
 		})
 	}
 }
