@@ -64,6 +64,28 @@ func readOutput(t *testing.T, path string) dcgmOutput {
 	return out
 }
 
+// sentinelTimestamp is stamped into a pre-existing metrics file before a test
+// invokes reconcileAndCollect. Because reconcileAndCollect always stamps the
+// current time when it writes, comparing the read-back timestamp against this
+// sentinel tells us whether a fresh snapshot was written (timestamp changed) or
+// the file was left untouched (timestamp unchanged) — a clock-granularity-proof
+// way to detect a write, since the sentinel is decades in the past.
+const sentinelTimestamp = "2000-01-01T00:00:00Z"
+
+// seedOutput writes a pre-existing metrics snapshot stamped with
+// sentinelTimestamp to path, so a later read reveals whether reconcileAndCollect
+// overwrote it.
+func seedOutput(t *testing.T, path string) {
+	t.Helper()
+	data, err := json.MarshalIndent(dcgmOutput{
+		Timestamp: sentinelTimestamp,
+		Healthy:   true,
+		GPUs:      []gputypes.GPUMetric{{GPUUUID: "GPU-preexisting"}},
+	}, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, metricsFilePermission))
+}
+
 func TestNewEngine(t *testing.T) {
 	t.Parallel()
 
@@ -96,11 +118,14 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 		name             string
 		setupMock        func(*mock_dcgm.MockClient, *atomic.Int64, *atomic.Int64)
 		expectGetMetrics bool
-		expectWrite      bool
-		verify           func(t *testing.T, out dcgmOutput)
+		// wantFreshWrite is true when reconcileAndCollect is expected to write a
+		// fresh snapshot (advancing the seeded sentinel timestamp), false when it
+		// should leave the pre-existing file untouched.
+		wantFreshWrite bool
+		verify         func(t *testing.T, out dcgmOutput)
 	}{
 		{
-			name: "reconcile failure skips GetMetrics",
+			name: "reconcile failure leaves the existing file untouched",
 			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
 				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
 					reconciles.Add(1)
@@ -112,10 +137,10 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 				}).AnyTimes()
 			},
 			expectGetMetrics: false,
-			expectWrite:      false,
+			wantFreshWrite:   false,
 		},
 		{
-			name: "GetMetrics failure skips file write of metrics",
+			name: "GetMetrics failure writes a fresh status snapshot",
 			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
 				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
 					reconciles.Add(1)
@@ -130,10 +155,10 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 			expectGetMetrics: true,
 			// A GetMetrics failure is non-fatal: a status snapshot with no per-GPU
 			// metrics is still written (the file-sink analog of the reference's
-			// "status only, no SetGPUMetrics").
-			expectWrite: true,
+			// "status only, no SetGPUMetrics"). The harness confirms the seeded
+			// timestamp advanced; here we confirm the snapshot's contents.
+			wantFreshWrite: true,
 			verify: func(t *testing.T, out dcgmOutput) {
-				assert.NotEmpty(t, out.Timestamp, "status file should carry a fresh timestamp")
 				assert.True(t, out.ConnectionLost, "status file should reflect connection lost")
 				assert.Empty(t, out.GPUs, "no per-GPU metrics should be present on collection failure")
 			},
@@ -155,7 +180,7 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 				expectStatus(m, true, "", false)
 			},
 			expectGetMetrics: true,
-			expectWrite:      true,
+			wantFreshWrite:   true,
 			verify: func(t *testing.T, out dcgmOutput) {
 				assert.True(t, out.Healthy)
 				assert.Empty(t, out.UnhealthyReason)
@@ -180,7 +205,7 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 				expectStatus(m, false, "XID_48", false)
 			},
 			expectGetMetrics: true,
-			expectWrite:      true,
+			wantFreshWrite:   true,
 			verify: func(t *testing.T, out dcgmOutput) {
 				assert.False(t, out.Healthy, "unhealthy GPU should report healthy=false")
 				assert.Equal(t, "XID_48", out.UnhealthyReason, "should report the XID error code")
@@ -196,6 +221,11 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 			defer ctrl.Finish()
 
 			outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+
+			// Seed a pre-existing snapshot stamped with sentinelTimestamp so we can
+			// tell, by whether that timestamp advances, if reconcileAndCollect wrote
+			// a fresh snapshot or left the file untouched.
+			seedOutput(t, outputPath)
 
 			var reconcileCalls, getMetricsCalls atomic.Int64
 			mockClient := mock_dcgm.NewMockClient(ctrl)
@@ -220,19 +250,23 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 			assert.GreaterOrEqual(t, reconcileCalls.Load(), int64(1),
 				"Reconcile should always be called")
 
-			// Verify the metrics were written to the file (the file-sink analog of
-			// the reference draining the MetricsDirector mailbox).
-			if tc.expectWrite {
-				// The staging temp file must have been renamed away.
-				_, err := os.Stat(eng.tempPath())
-				assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
+			// The staging temp file must never linger, regardless of outcome.
+			_, err := os.Stat(eng.tempPath())
+			assert.True(t, os.IsNotExist(err), "temp file should not remain after reconcileAndCollect")
+
+			out := readOutput(t, outputPath)
+			if tc.wantFreshWrite {
+				// A fresh snapshot overwrote the seed: the sentinel timestamp is gone.
+				assert.NotEqual(t, sentinelTimestamp, out.Timestamp,
+					"reconcileAndCollect should overwrite the seeded snapshot with a fresh timestamp")
+				assert.NotEmpty(t, out.Timestamp, "fresh snapshot should carry a timestamp")
 				if tc.verify != nil {
-					tc.verify(t, readOutput(t, outputPath))
+					tc.verify(t, out)
 				}
 			} else {
-				// Verify nothing was written.
-				_, err := os.Stat(outputPath)
-				assert.True(t, os.IsNotExist(err), "no file should be written when reconciliation fails")
+				// The file was left untouched: the seeded snapshot survives verbatim.
+				assert.Equal(t, sentinelTimestamp, out.Timestamp,
+					"reconcileAndCollect should not rewrite the file when reconciliation fails")
 			}
 		})
 	}
@@ -347,36 +381,44 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 // TestStartCancelsRunLoopOnSIGTERM verifies the shutdown mechanism the systemd
 // unit relies on (there is no "stop" command / ExecStop): SIGTERM cancels the
 // run loop and Start() returns nil after shutting the client down exactly once.
-// It also exercises the Start()-only paths — MkdirAll, ensureFile for the
-// metrics and temp files, and the deferred Shutdown. It is not parallel because
-// it delivers a signal to the whole test process.
+// It also exercises the Start()-only paths — the signal handler and the deferred
+// Shutdown. It is not parallel because it delivers a signal to the whole test
+// process.
 func TestStartCancelsRunLoopOnSIGTERM(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	// Nested path so Start() also has to create a missing parent directory.
-	outputPath := filepath.Join(t.TempDir(), "nested", "gpu-metrics.json")
+	// Start() requires the metrics file and its temp file to already exist and be
+	// writable; pre-create both empty (t.TempDir() already exists).
+	outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+	require.NoError(t, os.WriteFile(outputPath, nil, metricsFilePermission))
+	require.NoError(t, os.WriteFile(outputPath+".tmp", nil, metricsFilePermission))
 
+	// Count GetMetrics calls so we can wait for a real collection tick before
+	// signalling. Gating on a collection (not merely on the pre-created file
+	// existing) guarantees the run loop is active AND that signal.NotifyContext
+	// has already installed the SIGTERM handler, so the signal cannot hit the
+	// default disposition and kill the test process.
+	var getMetricsCalls atomic.Int64
 	mockClient := mock_dcgm.NewMockClient(ctrl)
 	mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
-	mockClient.EXPECT().GetMetrics(gomock.Any()).Return([]gputypes.GPUMetric{
-		{GPUUUID: "GPU-start-001"},
-	}, nil).AnyTimes()
+	mockClient.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+		getMetricsCalls.Add(1)
+		return []gputypes.GPUMetric{{GPUUUID: "GPU-start-001"}}, nil
+	}).AnyTimes()
 	expectStatus(mockClient, true, "", false)
 	mockClient.EXPECT().Shutdown().Return(nil).Times(1)
 
-	// Long interval so the loop blocks in select until the signal fires.
-	eng := newTestEngine(mockClient, outputPath, time.Hour)
+	// Short interval so the loop actually collects quickly.
+	eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
 
 	done := make(chan error, 1)
 	go func() { done <- eng.Start() }()
 
-	// Wait until the run loop is active (the file has been written once), then
-	// deliver SIGTERM: NotifyContext should cancel the context and Start() should
-	// return nil.
+	// Wait until the run loop has collected at least once, then deliver SIGTERM:
+	// NotifyContext should cancel the context and Start() should return nil.
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(outputPath)
-		return err == nil
+		return getMetricsCalls.Load() >= 1
 	}, 2*time.Second, 5*time.Millisecond, "Start() should begin collecting before shutdown")
 
 	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
@@ -388,31 +430,55 @@ func TestStartCancelsRunLoopOnSIGTERM(t *testing.T) {
 		t.Fatal("Start() did not return after SIGTERM was delivered")
 	}
 
-	// The metrics file survives; the staging temp file was renamed away.
-	_, err := os.Stat(outputPath)
-	assert.NoError(t, err, "the metrics file should exist after Start() returns")
+	// The collection actually ran end-to-end: the file holds the collected GPU.
+	out := readOutput(t, outputPath)
+	require.Len(t, out.GPUs, 1)
+	assert.Equal(t, "GPU-start-001", out.GPUs[0].GPUUUID)
+
+	// The staging temp file was renamed away, not left behind.
+	_, err := os.Stat(outputPath + ".tmp")
+	assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
 }
 
-// TestEnsureFile verifies ensureFile creates a missing file and is a no-op on an
-// existing one (it must not truncate), which is what makes it safe to call on
-// every restart.
-func TestEnsureFile(t *testing.T) {
-	t.Parallel()
+// TestStartExitsEarlyWhenFilesMissing verifies Start() fails fast (before the
+// collection loop and before touching the DCGM client) when the metrics file or
+// its temp file is absent, rather than spinning a loop whose writes would fail
+// every tick.
+func TestStartExitsEarlyWhenFilesMissing(t *testing.T) {
+	testCases := []struct {
+		name string
+		// seed reports which of the two required files to pre-create; the other
+		// is left missing to trigger the early exit.
+		seedOutput bool
+		seedTemp   bool
+	}{
+		{name: "both files missing", seedOutput: false, seedTemp: false},
+		{name: "metrics file missing", seedOutput: false, seedTemp: true},
+		{name: "temp file missing", seedOutput: true, seedTemp: false},
+	}
 
-	path := filepath.Join(t.TempDir(), "gpu-metrics.json")
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
 
-	// Missing file: created without error.
-	require.NoError(t, ensureFile(path))
-	_, err := os.Stat(path)
-	require.NoError(t, err, "ensureFile should create the file when it is absent")
+			outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+			if tc.seedOutput {
+				require.NoError(t, os.WriteFile(outputPath, nil, metricsFilePermission))
+			}
+			if tc.seedTemp {
+				require.NoError(t, os.WriteFile(outputPath+".tmp", nil, metricsFilePermission))
+			}
 
-	// Existing file with content: ensureFile must neither error nor truncate.
-	content := []byte(`{"gpus":[]}`)
-	require.NoError(t, os.WriteFile(path, content, metricsFilePermission))
+			// The client must never be touched when Start() exits early: no
+			// Reconcile/GetMetrics/Shutdown expectations are set, so any call fails
+			// the test.
+			mockClient := mock_dcgm.NewMockClient(ctrl)
+			eng := newTestEngine(mockClient, outputPath, time.Hour)
 
-	require.NoError(t, ensureFile(path), "ensureFile should not error when the file already exists")
-
-	got, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, content, got, "ensureFile must not truncate an existing file")
+			err := eng.Start()
+			require.Error(t, err, "Start() should fail when a required file is missing")
+			assert.Contains(t, err.Error(), "missing or not writable")
+		})
+	}
 }

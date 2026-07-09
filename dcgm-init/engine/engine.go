@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -36,14 +35,10 @@ const (
 )
 
 const (
-	MetricsDirectory    = "/var/run/ecs/"
-	MetricsFilePath     = "/var/run/ecs/gpu-metrics.json"
-	TempMetricsFilePath = "/var/run/ecs/gpu-metrics.json.tmp"
-
-	// metricsDirPermission is the permission for the directory holding the
-	// metrics file. 0755 lets the agent (which bind-mounts /var/run/ecs
-	// read-only) traverse into the directory to read the metrics file.
-	metricsDirPermission os.FileMode = 0755
+	// MetricsFilePath is the shared file dcgm-init writes GPU metrics to and the
+	// agent reads. Its parent directory is expected to already exist (the
+	// dcgm-init systemd unit provisions it); dcgm-init does not create it.
+	MetricsFilePath = "/var/run/ecs/gpu-metrics.json"
 
 	// metricsFilePermission is the permission for the metrics file and its
 	// staging temp file. 0644 keeps the file world-readable so the agent can
@@ -86,28 +81,18 @@ func (e *Engine) tempPath() string {
 	return e.outputPath + ".tmp"
 }
 
-// Start prepares the output location and then runs the metrics collection loop
-// until a SIGTERM/SIGINT is received (systemd's default stop sends SIGTERM).
+// Start runs the metrics collection loop until a SIGTERM/SIGINT is received
+// (systemd's default stop sends SIGTERM). The metrics file and its staging temp
+// file are expected to already exist and be writable (provisioned by the
+// dcgm-init systemd unit / package install).
 func (e *Engine) Start() error {
-	// Ensure the output directory exists. MkdirAll is a no-op when the
-	// directory is already present; any other failure means we have nowhere to
-	// write metrics, so fail fast and let systemd surface the error.
-	outputDir := filepath.Dir(e.outputPath)
-	if err := os.MkdirAll(outputDir, metricsDirPermission); err != nil {
-		return fmt.Errorf("dcgm-init failed to create metrics directory %s: %w", outputDir, err)
-	}
-
-	// Ensure the metrics file and its staging temp file exist so the agent,
-	// which bind-mounts this directory read-only, always finds a file to read
-	// even before the first collection completes (DCGM initialization can take
-	// up to the grace period). ensureFile leaves an existing file untouched, so
-	// this is safe across restarts; only an inability to create the files is
-	// fatal.
-	if err := ensureFile(e.outputPath); err != nil {
-		return fmt.Errorf("dcgm-init failed to create metrics file %s: %w", e.outputPath, err)
-	}
-	if err := ensureFile(e.tempPath()); err != nil {
-		return fmt.Errorf("dcgm-init failed to create temp metrics file %s: %w", e.tempPath(), err)
+	// Verify both the metrics file and its staging temp file exist and are
+	// writable before starting; exit early rather than run a collection loop
+	// whose writes would fail on every tick.
+	for _, path := range []string{e.outputPath, e.tempPath()} {
+		if err := ensureWritable(path); err != nil {
+			return fmt.Errorf("dcgm-init required metrics file %s is missing or not writable: %w", path, err)
+		}
 	}
 
 	// Cancel the context when a shutdown signal arrives so the run loop unwinds
@@ -213,11 +198,12 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 	return nil
 }
 
-// ensureFile creates path with metricsFilePermission if it does not already
-// exist. An existing file is left untouched so a restart preserves the last
-// metrics written.
-func ensureFile(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE, metricsFilePermission)
+// ensureWritable returns an error if path does not exist or cannot be opened for
+// writing. It opens the file for writing without creating or truncating it, so a
+// missing file, a directory, or insufficient permissions all surface as an
+// error while an existing writable file is left untouched.
+func ensureWritable(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, metricsFilePermission)
 	if err != nil {
 		return err
 	}
