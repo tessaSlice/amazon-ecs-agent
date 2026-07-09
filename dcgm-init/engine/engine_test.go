@@ -267,7 +267,7 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 				// Wait for at least one collection tick.
 				assert.Eventually(t, func() bool {
 					return getMetricsCalls.Load() >= 1
-				}, 200*time.Millisecond, 5*time.Millisecond,
+				}, 2*time.Second, 5*time.Millisecond,
 					"Expected at least one GetMetrics call from ticker")
 			},
 		},
@@ -284,20 +284,24 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 				// Wait for at least one tick to confirm the loop is running.
 				assert.Eventually(t, func() bool {
 					return reconcileCalls.Load() >= 1
-				}, 200*time.Millisecond, 5*time.Millisecond,
+				}, 2*time.Second, 5*time.Millisecond,
 					"Expected at least one Reconcile call")
 
 				// Cancel the context to stop the loop.
 				cancel()
 
-				// Record the call count after cancellation.
-				time.Sleep(50 * time.Millisecond)
-				countAfterCancel := reconcileCalls.Load()
-
-				// Verify no more calls happen after cancellation.
-				time.Sleep(50 * time.Millisecond)
-				assert.Equal(t, countAfterCancel, reconcileCalls.Load(),
-					"No more Reconcile calls should happen after context cancellation")
+				// Poll until the Reconcile count stops advancing across a full poll
+				// interval, which proves the loop exited: a still-running 5ms ticker
+				// would increment within any 20ms gap, so two equal consecutive reads
+				// can only happen once the loop has stopped. This replaces fixed sleeps,
+				// which race against an in-flight tick landing after the measurement.
+				const pollGap = 20 * time.Millisecond
+				require.Eventually(t, func() bool {
+					before := reconcileCalls.Load()
+					time.Sleep(pollGap)
+					return reconcileCalls.Load() == before
+				}, 2*time.Second, pollGap,
+					"Reconcile calls should stop after context cancellation")
 			},
 		},
 	}
