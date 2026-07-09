@@ -98,9 +98,9 @@ func (e *Engine) Start() error {
 	// Cancel the context when a shutdown signal arrives so the run loop unwinds
 	// cleanly. There is no separate "stop" command; shutdown is signal-driven
 	// (systemd's default stop sends SIGTERM). NotifyContext installs the signal
-	// handler and returns a context that is cancelled on SIGINT/SIGTERM; stop
-	// removes the handler when we return.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// handler and returns a context that is cancelled on SIGTERM; stop removes
+	// the handler when we return.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 
 	// Release DCGM/nv-hostengine resources on the way out.
