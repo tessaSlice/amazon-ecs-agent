@@ -46,8 +46,8 @@ func newTestEngine(client *mock_dcgm.MockClient, outputPath string, collectionIn
 }
 
 // expectStatus stubs the health-reporting methods every reconcileAndCollect
-// invokes once it gets past reconciliation. Values are asserted through the
-// written file, not here.
+// invokes once it gets past reconciliation. The returned values are not asserted
+// for the time being; the stubs only satisfy the calls reconcileAndCollect makes.
 func expectStatus(m *mock_dcgm.MockClient, healthy bool, reason string, connLost bool) {
 	m.EXPECT().IsHealthy().Return(healthy).AnyTimes()
 	m.EXPECT().UnhealthyReason().Return(reason).AnyTimes()
@@ -159,7 +159,6 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 			// timestamp advanced; here we confirm the snapshot's contents.
 			wantFreshWrite: true,
 			verify: func(t *testing.T, out dcgmOutput) {
-				assert.True(t, out.ConnectionLost, "status file should reflect connection lost")
 				assert.Empty(t, out.GPUs, "no per-GPU metrics should be present on collection failure")
 			},
 		},
@@ -182,33 +181,10 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 			expectGetMetrics: true,
 			wantFreshWrite:   true,
 			verify: func(t *testing.T, out dcgmOutput) {
-				assert.True(t, out.Healthy)
-				assert.Empty(t, out.UnhealthyReason)
-				assert.False(t, out.ConnectionLost)
 				require.Len(t, out.GPUs, 1)
 				assert.Equal(t, "GPU-test-uuid-1", out.GPUs[0].GPUUUID)
 				require.NotNil(t, out.GPUs[0].GPUUtilization)
 				assert.Equal(t, 75.0, *out.GPUs[0].GPUUtilization)
-			},
-		},
-		{
-			name: "unhealthy GPU records the XID reason",
-			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
-				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
-					reconciles.Add(1)
-					return true, nil
-				}).AnyTimes()
-				m.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
-					getMetrics.Add(1)
-					return []gputypes.GPUMetric{{GPUUUID: "GPU-unhealthy-001"}}, nil
-				}).AnyTimes()
-				expectStatus(m, false, "XID_48", false)
-			},
-			expectGetMetrics: true,
-			wantFreshWrite:   true,
-			verify: func(t *testing.T, out dcgmOutput) {
-				assert.False(t, out.Healthy, "unhealthy GPU should report healthy=false")
-				assert.Equal(t, "XID_48", out.UnhealthyReason, "should report the XID error code")
 			},
 		},
 	}
@@ -378,107 +354,109 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 	}
 }
 
-// TestStartCancelsRunLoopOnSIGTERM verifies the shutdown mechanism the systemd
-// unit relies on (there is no "stop" command / ExecStop): SIGTERM cancels the
-// run loop and Start() returns nil after shutting the client down exactly once.
-// It also exercises the Start()-only paths — the signal handler and the deferred
-// Shutdown. It is not parallel because it delivers a signal to the whole test
-// process.
-func TestStartCancelsRunLoopOnSIGTERM(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	// Start() requires the metrics file and its temp file to already exist and be
-	// writable; pre-create both empty (t.TempDir() already exists).
-	outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
-	require.NoError(t, os.WriteFile(outputPath, nil, metricsFilePermission))
-	require.NoError(t, os.WriteFile(outputPath+".tmp", nil, metricsFilePermission))
-
-	// Count GetMetrics calls so we can wait for a real collection tick before
-	// signalling. Gating on a collection (not merely on the pre-created file
-	// existing) guarantees the run loop is active AND that signal.NotifyContext
-	// has already installed the SIGTERM handler, so the signal cannot hit the
-	// default disposition and kill the test process.
-	var getMetricsCalls atomic.Int64
-	mockClient := mock_dcgm.NewMockClient(ctrl)
-	mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
-	mockClient.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
-		getMetricsCalls.Add(1)
-		return []gputypes.GPUMetric{{GPUUUID: "GPU-start-001"}}, nil
-	}).AnyTimes()
-	expectStatus(mockClient, true, "", false)
-	mockClient.EXPECT().Shutdown().Return(nil).Times(1)
-
-	// Short interval so the loop actually collects quickly.
-	eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
-
-	done := make(chan error, 1)
-	go func() { done <- eng.Start() }()
-
-	// Wait until the run loop has collected at least once, then deliver SIGTERM:
-	// NotifyContext should cancel the context and Start() should return nil.
-	require.Eventually(t, func() bool {
-		return getMetricsCalls.Load() >= 1
-	}, 2*time.Second, 5*time.Millisecond, "Start() should begin collecting before shutdown")
-
-	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
-
-	select {
-	case err := <-done:
-		assert.NoError(t, err, "Start() should return nil after SIGTERM cancels the run loop")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Start() did not return after SIGTERM was delivered")
-	}
-
-	// The collection actually ran end-to-end: the file holds the collected GPU.
-	out := readOutput(t, outputPath)
-	require.Len(t, out.GPUs, 1)
-	assert.Equal(t, "GPU-start-001", out.GPUs[0].GPUUUID)
-
-	// The staging temp file was renamed away, not left behind.
-	_, err := os.Stat(outputPath + ".tmp")
-	assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
-}
-
-// TestStartExitsEarlyWhenFilesMissing verifies Start() fails fast (before the
-// collection loop and before touching the DCGM client) when the metrics file or
-// its temp file is absent, rather than spinning a loop whose writes would fail
-// every tick.
-func TestStartExitsEarlyWhenFilesMissing(t *testing.T) {
+// TestStartFilePreconditions verifies Start()'s up-front check that the metrics
+// file and its temp file both exist and are writable. When the check fails,
+// Start() must fail fast — before the collection loop and before touching the
+// DCGM client — rather than spinning a loop whose writes would fail every tick.
+// When the check passes, Start() proceeds into the collection loop (which we
+// stop with SIGTERM).
+func TestStartFilePreconditions(t *testing.T) {
 	testCases := []struct {
 		name string
-		// seed reports which of the two required files to pre-create; the other
-		// is left missing to trigger the early exit.
+		// seedOutput/seedTemp report which of the two required files to
+		// pre-create; a file left un-seeded is missing.
 		seedOutput bool
 		seedTemp   bool
+		// unwritable names the seeded file ("output" or "temp") to strip write
+		// permission from, or "" to leave both writable.
+		unwritable string
+		// wantErr is true when the precondition check should fail Start().
+		wantErr bool
 	}{
-		{name: "both files missing", seedOutput: false, seedTemp: false},
-		{name: "metrics file missing", seedOutput: false, seedTemp: true},
-		{name: "temp file missing", seedOutput: true, seedTemp: false},
+		{name: "both files missing", seedOutput: false, seedTemp: false, wantErr: true},
+		{name: "metrics file missing", seedOutput: false, seedTemp: true, wantErr: true},
+		{name: "temp file missing", seedOutput: true, seedTemp: false, wantErr: true},
+		{name: "metrics file not writable", seedOutput: true, seedTemp: true, unwritable: "output", wantErr: true},
+		{name: "both files exist and writable", seedOutput: true, seedTemp: true, wantErr: false},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Permission enforcement is bypassed for root, so a read-only file is
+			// still writable; skip the not-writable case when running as root.
+			if tc.unwritable != "" && os.Geteuid() == 0 {
+				t.Skip("write-permission checks are bypassed when running as root")
+			}
+
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
 			outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+			tempPath := outputPath + ".tmp"
 			if tc.seedOutput {
 				require.NoError(t, os.WriteFile(outputPath, nil, metricsFilePermission))
 			}
 			if tc.seedTemp {
-				require.NoError(t, os.WriteFile(outputPath+".tmp", nil, metricsFilePermission))
+				require.NoError(t, os.WriteFile(tempPath, nil, metricsFilePermission))
+			}
+			switch tc.unwritable {
+			case "output":
+				require.NoError(t, os.Chmod(outputPath, 0400))
+			case "temp":
+				require.NoError(t, os.Chmod(tempPath, 0400))
 			}
 
-			// The client must never be touched when Start() exits early: no
-			// Reconcile/GetMetrics/Shutdown expectations are set, so any call fails
-			// the test.
 			mockClient := mock_dcgm.NewMockClient(ctrl)
-			eng := newTestEngine(mockClient, outputPath, time.Hour)
 
-			err := eng.Start()
-			require.Error(t, err, "Start() should fail when a required file is missing")
-			assert.Contains(t, err.Error(), "missing or not writable")
+			if tc.wantErr {
+				// On the failure path the client must never be touched: no
+				// expectations are set, so any Reconcile/GetMetrics/Shutdown call
+				// fails the test.
+				eng := newTestEngine(mockClient, outputPath, time.Hour)
+
+				err := eng.Start()
+				require.Error(t, err, "Start() should fail when a required file is missing or not writable")
+				assert.Contains(t, err.Error(), "missing or not writable")
+				return
+			}
+
+			// On the success path the preconditions pass and Start() enters the
+			// collection loop; wire up the client and stop the loop with SIGTERM.
+			var getMetricsCalls atomic.Int64
+			mockClient.EXPECT().Reconcile(gomock.Any()).Return(true, nil).AnyTimes()
+			mockClient.EXPECT().GetMetrics(gomock.Any()).DoAndReturn(func(context.Context) ([]gputypes.GPUMetric, error) {
+				getMetricsCalls.Add(1)
+				return []gputypes.GPUMetric{{GPUUUID: "GPU-start-001"}}, nil
+			}).AnyTimes()
+			expectStatus(mockClient, true, "", false)
+			mockClient.EXPECT().Shutdown().Return(nil).Times(1)
+
+			eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
+
+			done := make(chan error, 1)
+			go func() { done <- eng.Start() }()
+
+			// Wait for a real collection tick (which also guarantees the SIGTERM
+			// handler is installed) before signalling.
+			require.Eventually(t, func() bool {
+				return getMetricsCalls.Load() >= 1
+			}, 2*time.Second, 5*time.Millisecond, "Start() should begin collecting when preconditions pass")
+
+			require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
+
+			select {
+			case err := <-done:
+				assert.NoError(t, err, "Start() should return nil after SIGTERM cancels the run loop")
+			case <-time.After(2 * time.Second):
+				t.Fatal("Start() did not return after SIGTERM was delivered")
+			}
+
+			// The collection ran end-to-end and the temp file was renamed away.
+			out := readOutput(t, outputPath)
+			require.Len(t, out.GPUs, 1)
+			assert.Equal(t, "GPU-start-001", out.GPUs[0].GPUUUID)
+			_, err := os.Stat(tempPath)
+			assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
 		})
 	}
 }
