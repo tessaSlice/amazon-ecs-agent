@@ -191,8 +191,6 @@ test-init:
 		./... && cd ..
 	cd ecs-init && go tool cover -func ../cover.out > ../coverprofile-init.out && cd ..
 
-# dcgm-init needs CGO for the NVIDIA go-dcgm bindings; the linker flag defers
-# DCGM symbol resolution to the shared library present on GPU hosts at runtime.
 .PHONY: build-dcgm-init test-dcgm-init
 build-dcgm-init:
 	cd dcgm-init && CGO_ENABLED=1 CGO_LDFLAGS="-Wl,--unresolved-symbols=ignore-in-object-files" \
