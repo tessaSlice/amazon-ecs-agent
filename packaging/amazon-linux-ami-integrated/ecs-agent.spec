@@ -306,10 +306,9 @@ install -m %{no_exec_perm} -D %{SOURCE2} $RPM_BUILD_ROOT/%{_unitdir}/ecs.service
 install -m %{no_exec_perm} -D %{SOURCE3} $RPM_BUILD_ROOT/%{_unitdir}/amazon-ecs-volume-plugin.service
 install -m %{no_exec_perm} -D %{SOURCE4} $RPM_BUILD_ROOT/%{_unitdir}/amazon-ecs-volume-plugin.socket
 install -m %{no_exec_perm} -D %{SOURCE8} $RPM_BUILD_ROOT/%{_unitdir}/dcgm-init.service
-# dcgm-init only runs via its systemd unit, so its binary is packaged only in
-# the systemd build. It writes gpu-metrics.json into /var/run/ecs (tmpfs), which
-# is recreated empty on every boot; dcgm-init creates that directory on demand
-# (os.MkdirAll) at startup, so the RPM neither ships nor owns the tmpfs path.
+# dcgm-init runs only via its systemd unit, so the binary is packaged only in
+# the systemd build. It writes into /var/run/ecs (tmpfs), which it creates on
+# demand at startup, so the RPM neither ships nor owns that tmpfs path.
 install -D amazon-dcgm-init %{buildroot}%{_libexecdir}/dcgm-init
 %else
 install -m %{no_exec_perm} -D %{SOURCE1} %{buildroot}%{_sysconfdir}/init/ecs.conf
