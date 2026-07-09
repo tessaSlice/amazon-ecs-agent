@@ -94,7 +94,7 @@ func (e *Engine) Start() error {
 	// write metrics, so fail fast and let systemd surface the error.
 	outputDir := filepath.Dir(e.outputPath)
 	if err := os.MkdirAll(outputDir, metricsDirPermission); err != nil {
-		return fmt.Errorf("failed to create metrics directory %s: %w", outputDir, err)
+		return fmt.Errorf("dcgm-init failed to create metrics directory %s: %w", outputDir, err)
 	}
 
 	// Ensure the metrics file and its staging temp file exist so the agent,
@@ -104,10 +104,10 @@ func (e *Engine) Start() error {
 	// this is safe across restarts; only an inability to create the files is
 	// fatal.
 	if err := ensureFile(e.outputPath); err != nil {
-		return fmt.Errorf("failed to create metrics file %s: %w", e.outputPath, err)
+		return fmt.Errorf("dcgm-init failed to create metrics file %s: %w", e.outputPath, err)
 	}
 	if err := ensureFile(e.tempPath()); err != nil {
-		return fmt.Errorf("failed to create temp metrics file %s: %w", e.tempPath(), err)
+		return fmt.Errorf("dcgm-init failed to create temp metrics file %s: %w", e.tempPath(), err)
 	}
 
 	// Cancel the context when a shutdown signal arrives so the run loop unwinds
@@ -195,7 +195,7 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 
 	data, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal metrics: %w", err)
+		return fmt.Errorf("dcgm-init failed to marshal metrics: %w", err)
 	}
 
 	// Write to the temp file and then atomically rename it onto the final path.
@@ -203,10 +203,10 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 	// write target that the rename moves into place.
 	tempPath := e.tempPath()
 	if err := os.WriteFile(tempPath, data, metricsFilePermission); err != nil {
-		return fmt.Errorf("failed to write metrics to %s: %w", tempPath, err)
+		return fmt.Errorf("dcgm-init failed to write metrics to %s: %w", tempPath, err)
 	}
 	if err := os.Rename(tempPath, e.outputPath); err != nil {
-		return fmt.Errorf("failed to rename %s to %s: %w", tempPath, e.outputPath, err)
+		return fmt.Errorf("dcgm-init failed to rename %s to %s: %w", tempPath, e.outputPath, err)
 	}
 
 	logger.Debug("dcgm-init wrote GPU metrics")
