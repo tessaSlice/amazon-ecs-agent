@@ -16,20 +16,21 @@
 package types
 
 const (
-	// GPUMetricsDirPath holds the shared GPU metrics file. dcgm-init (writer)
-	// and the agent (reader) share these constants so their paths cannot drift.
+	// gpuMetricsDirPath is the directory holding the shared GPU metrics file.
 	// It is /var/run/ecs, the tmpfs runtime dir ECS already uses for
 	// host<->container IPC; the metrics are a live per-boot snapshot with no
 	// value across reboots. dcgm-init creates the dir on demand (it is tmpfs and
 	// starts empty each boot) rather than the RPM owning a tmpfs path.
-	GPUMetricsDirPath = "/var/run/ecs"
+	gpuMetricsDirPath = "/var/run/ecs"
 
-	// GPUMetricsFileName is the file dcgm-init writes GPU metrics to and the
+	// gpuMetricsFileName is the file dcgm-init writes GPU metrics to and the
 	// agent reads.
-	GPUMetricsFileName = "gpu-metrics.json"
+	gpuMetricsFileName = "gpu-metrics.json"
 
 	// GPUMetricsFilePath is the full path to the shared GPU metrics file.
-	GPUMetricsFilePath = GPUMetricsDirPath + "/" + GPUMetricsFileName
+	// dcgm-init (writer) and the agent (reader) reference this so their paths
+	// cannot drift.
+	GPUMetricsFilePath = gpuMetricsDirPath + "/" + gpuMetricsFileName
 )
 
 // GPUMetric holds per-device GPU telemetry. This struct is used by both

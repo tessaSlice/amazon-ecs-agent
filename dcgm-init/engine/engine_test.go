@@ -600,11 +600,30 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- eng.Start() }()
 
-		// Bounded join so a hung Start() is reported rather than blocking teardown.
+		// Guarantee the Start() goroutine is unwound on every exit path, including
+		// a require failure below that aborts the test (via runtime.Goexit) before
+		// the explicit SIGTERM. Without this, Start() stays blocked in its run loop
+		// and keeps writing into t.TempDir while t.Cleanup removes it.
 		startReturned := false
 		defer func() {
 			if startReturned {
 				return
+			}
+			// If Start() already returned (e.g. an early MkdirAll/ensureCreatable
+			// error), don't signal — just observe it.
+			select {
+			case <-done:
+				return
+			default:
+			}
+			// Only SIGTERM once Start()'s handler is provably installed. It is
+			// installed before the run loop, so a collection having occurred
+			// (getMetricsCalls >= 1) guarantees it; signaling earlier could hit the
+			// default disposition and kill the test binary. If no collection has
+			// happened yet we cannot safely signal, so fall through and report the
+			// leak rather than risk killing the process.
+			if getMetricsCalls.Load() >= 1 {
+				_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 			}
 			select {
 			case <-done:
@@ -629,6 +648,16 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("Start() did not return after SIGTERM was delivered")
 		}
+
+		// A valid snapshot was written into the newly-created directory, not just
+		// an empty dir: reconcileAndCollect write failures are non-fatal (only
+		// logged), so reading the file back is what actually exercises the write
+		// path under the on-demand-created directory.
+		out := readOutput(t, outputPath)
+		require.Len(t, out.GPUs, 1)
+		assert.Equal(t, "GPU-mkdir-001", out.GPUs[0].GPUUUID)
+		_, err = os.Stat(outputPath + metricsFileTempSuffix)
+		assert.True(t, os.IsNotExist(err), "temp file should not remain after the atomic rename")
 	})
 
 	t.Run("uncreatable directory fails fast", func(t *testing.T) {
