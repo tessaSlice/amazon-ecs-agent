@@ -438,12 +438,14 @@ func TestStartFilePreconditions(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- eng.Start() }()
 
-			// Always reap the Start() goroutine before the deferred ctrl.Finish()
-			// runs. Defers are LIFO and ctrl.Finish() was deferred earlier, so this
-			// runs first — ensuring Start() cannot call the mock (or write into
-			// t.TempDir) after the subtest has completed, even on the t.Fatal path
-			// below. On the happy path startReturned is already set, so this is a
-			// no-op and does not double-read the channel.
+			// Best-effort join of the Start() goroutine before the deferred
+			// ctrl.Finish() runs. Defers are LIFO and ctrl.Finish() was deferred
+			// earlier, so this runs first: on the t.Fatal (timeout) path below it
+			// waits up to 2s for Start() to exit so it stops calling the mock /
+			// writing into t.TempDir before the subtest tears down. The join is
+			// bounded, so a genuinely hung Start() is reported via t.Error rather
+			// than blocking forever. On the happy path startReturned is already
+			// set, so this is a no-op and does not double-read the channel.
 			startReturned := false
 			defer func() {
 				if startReturned {
