@@ -16,11 +16,7 @@
 package types
 
 const (
-	// gpuMetricsDirPath is the directory holding the shared GPU metrics file.
-	// It is /var/run/ecs, the tmpfs runtime dir ECS already uses for
-	// host<->container IPC; the metrics are a live per-boot snapshot with no
-	// value across reboots. dcgm-init creates the dir on demand (it is tmpfs and
-	// starts empty each boot) rather than the RPM owning a tmpfs path.
+	// directory holding the shared GPU metrics file
 	gpuMetricsDirPath = "/var/run/ecs"
 
 	gpuMetricsFileName = "gpu-metrics.json"
