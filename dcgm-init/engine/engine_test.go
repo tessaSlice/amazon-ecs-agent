@@ -433,8 +433,28 @@ func TestStartFilePreconditions(t *testing.T) {
 
 			eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
 
+			// The channel is buffered so eng.Start()'s final send never blocks,
+			// even if no one is waiting on it anymore.
 			done := make(chan error, 1)
 			go func() { done <- eng.Start() }()
+
+			// Always reap the Start() goroutine before the deferred ctrl.Finish()
+			// runs. Defers are LIFO and ctrl.Finish() was deferred earlier, so this
+			// runs first — ensuring Start() cannot call the mock (or write into
+			// t.TempDir) after the subtest has completed, even on the t.Fatal path
+			// below. On the happy path startReturned is already set, so this is a
+			// no-op and does not double-read the channel.
+			startReturned := false
+			defer func() {
+				if startReturned {
+					return
+				}
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Error("Start() goroutine leaked: did not exit after SIGTERM")
+				}
+			}()
 
 			// Wait for a real collection tick (which also guarantees the SIGTERM
 			// handler is installed) before signalling.
@@ -446,6 +466,7 @@ func TestStartFilePreconditions(t *testing.T) {
 
 			select {
 			case err := <-done:
+				startReturned = true
 				assert.NoError(t, err, "Start() should return nil after SIGTERM cancels the run loop")
 			case <-time.After(2 * time.Second):
 				t.Fatal("Start() did not return after SIGTERM was delivered")
