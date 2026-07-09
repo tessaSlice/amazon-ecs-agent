@@ -605,6 +605,7 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 		// the explicit SIGTERM. Without this, Start() stays blocked in its run loop
 		// and keeps writing into t.TempDir while t.Cleanup removes it.
 		startReturned := false
+		signaled := false
 		defer func() {
 			if startReturned {
 				return
@@ -616,13 +617,16 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 				return
 			default:
 			}
-			// Only SIGTERM once Start()'s handler is provably installed. It is
-			// installed before the run loop, so a collection having occurred
-			// (getMetricsCalls >= 1) guarantees it; signaling earlier could hit the
-			// default disposition and kill the test binary. If no collection has
-			// happened yet we cannot safely signal, so fall through and report the
-			// leak rather than risk killing the process.
-			if getMetricsCalls.Load() >= 1 {
+			// Never send a second SIGTERM if the main path already sent one: the
+			// first already cancelled Start()'s context, and a repeat could land
+			// after Start() has uninstalled its handler (defer stop()), hitting
+			// SIGTERM's default disposition and killing the test binary. Only signal
+			// here when we have not yet AND Start()'s handler is provably installed —
+			// it is installed before the run loop, so a collection having occurred
+			// (getMetricsCalls >= 1) guarantees it. Otherwise just wait and report a
+			// leak rather than risk the process.
+			if !signaled && getMetricsCalls.Load() >= 1 {
+				signaled = true
 				_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 			}
 			select {
@@ -640,6 +644,10 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 		require.NoError(t, err, "Start() should have created the missing metrics directory")
 		assert.True(t, info.IsDir(), "created metrics path should be a directory")
 
+		// Mark that the process-wide SIGTERM has been sent before sending it, so the
+		// deferred teardown never sends a second one (which could hit the default
+		// disposition after Start() uninstalls its handler and kill the test binary).
+		signaled = true
 		require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
 		select {
 		case err := <-done:
