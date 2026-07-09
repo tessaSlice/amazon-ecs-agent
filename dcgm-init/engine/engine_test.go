@@ -333,19 +333,25 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 			// Short interval so the ticker fires many times within the test window.
 			eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
 
-			done := make(chan struct{})
-			go func() { eng.run(ctx); close(done) }()
+			done := make(chan error, 1)
+			go func() { done <- eng.run(ctx) }()
+
+			// Reap the run() goroutine on every exit path — including a require
+			// failure inside testFunc that aborts via runtime.Goexit — so it stops
+			// touching the mock and t.TempDir before the deferred ctrl.Finish() runs.
+			// Registered after ctrl.Finish()/cancel() so LIFO runs this first, and it
+			// also asserts the loop returns nil on the normal (non-aborting) path.
+			defer func() {
+				cancel()
+				select {
+				case err := <-done:
+					assert.NoError(t, err, "run() should return nil when the context is cancelled")
+				case <-time.After(2 * time.Second):
+					t.Error("run() did not return after context cancellation")
+				}
+			}()
 
 			tc.testFunc(t, eng, mockClient, &reconcileCalls, &getMetricsCalls, cancel)
-
-			// Cancel (idempotent) and confirm the loop returns cleanly.
-			cancel()
-			select {
-			case <-done:
-				// run() returned cleanly after context cancellation.
-			case <-time.After(2 * time.Second):
-				t.Fatal("run() did not return after context cancellation")
-			}
 		})
 	}
 }
