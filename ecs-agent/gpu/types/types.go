@@ -17,10 +17,8 @@ package types
 
 const (
 	// directory holding the shared GPU metrics file
-	gpuMetricsDirPath = "/var/run/ecs"
-
+	gpuMetricsDirPath  = "/var/run/ecs"
 	gpuMetricsFileName = "gpu-metrics.json"
-
 	GPUMetricsFilePath = gpuMetricsDirPath + "/" + gpuMetricsFileName
 )
 
