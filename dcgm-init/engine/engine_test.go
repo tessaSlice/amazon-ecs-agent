@@ -64,12 +64,10 @@ func readOutput(t *testing.T, path string) dcgmOutput {
 	return out
 }
 
-// sentinelTimestamp is stamped into a pre-existing metrics file before a test
-// invokes reconcileAndCollect. Because reconcileAndCollect always stamps the
-// current time when it writes, comparing the read-back timestamp against this
-// sentinel tells us whether a fresh snapshot was written (timestamp changed) or
-// the file was left untouched (timestamp unchanged) — a clock-granularity-proof
-// way to detect a write, since the sentinel is decades in the past.
+// sentinelTimestamp seeds a metrics file with a timestamp decades in the past.
+// Since reconcileAndCollect stamps the current time on write, a read-back that
+// still shows the sentinel proves the file was left untouched, while any other
+// value proves a fresh write — independent of clock granularity.
 const sentinelTimestamp = "2000-01-01T00:00:00Z"
 
 // seedOutput writes a pre-existing metrics snapshot stamped with
@@ -154,9 +152,8 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 			},
 			expectGetMetrics: true,
 			// A GetMetrics failure is non-fatal: a status snapshot with no per-GPU
-			// metrics is still written (the file-sink analog of the reference's
-			// "status only, no SetGPUMetrics"). The harness confirms the seeded
-			// timestamp advanced; here we confirm the snapshot's contents.
+			// metrics is still written. The harness confirms the timestamp advanced;
+			// here we confirm the snapshot has no GPUs.
 			wantFreshWrite: true,
 			verify: func(t *testing.T, out dcgmOutput) {
 				assert.Empty(t, out.GPUs, "no per-GPU metrics should be present on collection failure")
@@ -355,12 +352,9 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 }
 
 // TestStartFilePreconditions verifies Start()'s up-front file checks: the
-// metrics file and its staging temp file are each created on demand if missing,
-// so Start() only fails when a file already exists but cannot be written. When a
-// check fails, Start() must fail fast — before the collection loop and before
-// touching the DCGM client — rather than spinning a loop whose writes would fail
-// every tick. When the checks pass, Start() proceeds into the collection loop
-// (which we stop with SIGTERM).
+// metrics file and its temp file are created on demand, so Start() fails fast
+// (before the loop and before touching the client) only when a file exists but
+// is unwritable, and otherwise proceeds into the loop (which we stop via SIGTERM).
 func TestStartFilePreconditions(t *testing.T) {
 	testCases := []struct {
 		name string
@@ -388,10 +382,8 @@ func TestStartFilePreconditions(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Permission enforcement is bypassed for root, so a read-only file is
-			// still writable. Skip only the cases that rely on a write denial to
-			// produce their expected error; the "read-only tolerated" case succeeds
-			// regardless and stays.
+			// Root bypasses permission enforcement, so a read-only file is still
+			// writable; skip cases that expect an error from a write denial.
 			if tc.unwritable != "" && tc.wantErr && os.Geteuid() == 0 {
 				t.Skip("write-permission checks are bypassed when running as root")
 			}
@@ -441,19 +433,16 @@ func TestStartFilePreconditions(t *testing.T) {
 
 			eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
 
-			// The channel is buffered so eng.Start()'s final send never blocks,
-			// even if no one is waiting on it anymore.
+			// Buffered so Start()'s final send never blocks, even with no reader.
 			done := make(chan error, 1)
 			go func() { done <- eng.Start() }()
 
-			// Best-effort join of the Start() goroutine before the deferred
-			// ctrl.Finish() runs. Defers are LIFO and ctrl.Finish() was deferred
-			// earlier, so this runs first: on the t.Fatal (timeout) path below it
-			// waits up to 2s for Start() to exit so it stops calling the mock /
-			// writing into t.TempDir before the subtest tears down. The join is
-			// bounded, so a genuinely hung Start() is reported via t.Error rather
-			// than blocking forever. On the happy path startReturned is already
-			// set, so this is a no-op and does not double-read the channel.
+			// Join the Start() goroutine before the deferred ctrl.Finish() (defers
+			// are LIFO, and ctrl.Finish() was deferred earlier). On the t.Fatal
+			// timeout path this waits up to 2s for Start() to exit so it stops
+			// touching the mock / t.TempDir before teardown; the wait is bounded so
+			// a hung Start() is reported via t.Error rather than blocking forever.
+			// On the happy path startReturned is set, so this is a no-op.
 			startReturned := false
 			defer func() {
 				if startReturned {
