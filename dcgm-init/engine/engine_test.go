@@ -354,37 +354,45 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 	}
 }
 
-// TestStartFilePreconditions verifies Start()'s up-front check that the metrics
-// file and its temp file both exist and are writable. When the check fails,
-// Start() must fail fast — before the collection loop and before touching the
-// DCGM client — rather than spinning a loop whose writes would fail every tick.
-// When the check passes, Start() proceeds into the collection loop (which we
-// stop with SIGTERM).
+// TestStartFilePreconditions verifies Start()'s up-front file checks: the
+// metrics file and its staging temp file are each created on demand if missing,
+// so Start() only fails when a file already exists but cannot be written. When a
+// check fails, Start() must fail fast — before the collection loop and before
+// touching the DCGM client — rather than spinning a loop whose writes would fail
+// every tick. When the checks pass, Start() proceeds into the collection loop
+// (which we stop with SIGTERM).
 func TestStartFilePreconditions(t *testing.T) {
 	testCases := []struct {
 		name string
-		// seedOutput/seedTemp report which of the two required files to
-		// pre-create; a file left un-seeded is missing.
+		// seedOutput/seedTemp report which of the two files to pre-create; a file
+		// left un-seeded is missing and should be created by Start().
 		seedOutput bool
 		seedTemp   bool
 		// unwritable names the seeded file ("output" or "temp") to strip write
 		// permission from, or "" to leave both writable.
 		unwritable string
-		// wantErr is true when the precondition check should fail Start().
-		wantErr bool
+		// wantErr is true when the precondition check should fail Start();
+		// errContains is a substring the returned error must contain.
+		wantErr     bool
+		errContains string
 	}{
-		{name: "both files missing", seedOutput: false, seedTemp: false, wantErr: true},
-		{name: "metrics file missing", seedOutput: false, seedTemp: true, wantErr: true},
-		{name: "temp file missing", seedOutput: true, seedTemp: false, wantErr: true},
-		{name: "metrics file not writable", seedOutput: true, seedTemp: true, unwritable: "output", wantErr: true},
+		// A missing file is created on demand, so absence is never fatal.
+		{name: "both files created when missing", seedOutput: false, seedTemp: false, wantErr: false},
+		{name: "temp file created when missing", seedOutput: true, seedTemp: false, wantErr: false},
 		{name: "both files exist and writable", seedOutput: true, seedTemp: true, wantErr: false},
+		// An existing but unwritable file is fatal — every collection would fail
+		// to write it.
+		{name: "metrics file not writable", seedOutput: true, seedTemp: true, unwritable: "output", wantErr: true, errContains: "cannot create or write"},
+		{name: "temp file not writable", seedOutput: true, seedTemp: true, unwritable: "temp", wantErr: true, errContains: "cannot create or write"},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Permission enforcement is bypassed for root, so a read-only file is
-			// still writable; skip the not-writable case when running as root.
-			if tc.unwritable != "" && os.Geteuid() == 0 {
+			// still writable. Skip only the cases that rely on a write denial to
+			// produce their expected error; the "read-only tolerated" case succeeds
+			// regardless and stays.
+			if tc.unwritable != "" && tc.wantErr && os.Geteuid() == 0 {
 				t.Skip("write-permission checks are bypassed when running as root")
 			}
 
@@ -415,8 +423,8 @@ func TestStartFilePreconditions(t *testing.T) {
 				eng := newTestEngine(mockClient, outputPath, time.Hour)
 
 				err := eng.Start()
-				require.Error(t, err, "Start() should fail when a required file is missing or not writable")
-				assert.Contains(t, err.Error(), "missing or not writable")
+				require.Error(t, err, "Start() should fail when a required file precondition is not met")
+				assert.Contains(t, err.Error(), tc.errContains)
 				return
 			}
 

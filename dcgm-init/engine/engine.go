@@ -83,15 +83,18 @@ func (e *Engine) tempPath() string {
 
 // Start runs the metrics collection loop until a SIGTERM/SIGINT is received
 // (systemd's default stop sends SIGTERM). The metrics file and its staging temp
-// file are expected to already exist and be writable (provisioned by the
-// dcgm-init systemd unit / package install).
+// file are created on demand if missing; Start only fails when a file already
+// exists but cannot be written.
 func (e *Engine) Start() error {
-	// Verify both the metrics file and its staging temp file exist and are
-	// writable before starting; exit early rather than run a collection loop
-	// whose writes would fail on every tick.
+	// Ensure both the metrics file and its staging temp file are writable,
+	// creating either if it does not yet exist. dcgm-init produces the metrics
+	// file via an atomic rename and stages every write to the temp file, so a
+	// missing file is created rather than treated as fatal; only an existing but
+	// unwritable file (or an unwritable parent directory) fails Start, because
+	// every collection would then fail to write.
 	for _, path := range []string{e.outputPath, e.tempPath()} {
-		if err := ensureWritable(path); err != nil {
-			return fmt.Errorf("dcgm-init required metrics file %s is missing or not writable: %w", path, err)
+		if err := ensureCreatable(path); err != nil {
+			return fmt.Errorf("dcgm-init cannot create or write metrics file %s: %w", path, err)
 		}
 	}
 
@@ -198,12 +201,12 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 	return nil
 }
 
-// ensureWritable returns an error if path does not exist or cannot be opened for
-// writing. It opens the file for writing without creating or truncating it, so a
-// missing file, a directory, or insufficient permissions all surface as an
-// error while an existing writable file is left untouched.
-func ensureWritable(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY, metricsFilePermission)
+// ensureCreatable verifies path can be written, creating it if it does not yet
+// exist. It opens the file O_CREATE|O_WRONLY (never truncating, so an existing
+// file's contents are preserved), so a missing file is created while a missing
+// parent directory or insufficient permissions surface as an error.
+func ensureCreatable(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, metricsFilePermission)
 	if err != nil {
 		return err
 	}
