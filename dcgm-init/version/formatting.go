@@ -26,7 +26,7 @@ func String() string {
 	return fmt.Sprintf("dcgm-init version %s (%s%s)", Version, dirtyMark, GitShortHash)
 }
 
-// PrintVersion print out the version info of dcgm-init
+// PrintVersion print out the
 func PrintVersion() error {
 	if Version == "" || GitShortHash == "" {
 		return fmt.Errorf("Version info not set")
