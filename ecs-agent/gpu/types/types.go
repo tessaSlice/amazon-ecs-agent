@@ -23,13 +23,8 @@ const (
 	// starts empty each boot) rather than the RPM owning a tmpfs path.
 	gpuMetricsDirPath = "/var/run/ecs"
 
-	// gpuMetricsFileName is the file dcgm-init writes GPU metrics to and the
-	// agent reads.
 	gpuMetricsFileName = "gpu-metrics.json"
 
-	// GPUMetricsFilePath is the full path to the shared GPU metrics file.
-	// dcgm-init (writer) and the agent (reader) reference this so their paths
-	// cannot drift.
 	GPUMetricsFilePath = gpuMetricsDirPath + "/" + gpuMetricsFileName
 )
 
