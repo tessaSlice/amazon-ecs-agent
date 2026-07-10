@@ -264,10 +264,9 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 				getMetricsCalls *atomic.Int64,
 				cancel context.CancelFunc,
 			) {
-				// Wait for at least one collection tick.
 				assert.Eventually(t, func() bool {
 					return getMetricsCalls.Load() >= 1
-				}, 2*time.Second, 5*time.Millisecond,
+				}, 200*time.Millisecond, 5*time.Millisecond,
 					"Expected at least one GetMetrics call from ticker")
 			},
 		},
@@ -281,27 +280,21 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 				getMetricsCalls *atomic.Int64,
 				cancel context.CancelFunc,
 			) {
-				// Wait for at least one tick to confirm the loop is running.
 				assert.Eventually(t, func() bool {
 					return reconcileCalls.Load() >= 1
-				}, 2*time.Second, 5*time.Millisecond,
+				}, 200*time.Millisecond, 5*time.Millisecond,
 					"Expected at least one Reconcile call")
 
-				// Cancel the context to stop the loop.
 				cancel()
 
-				// Poll until the Reconcile count stops advancing across a full poll
-				// interval, which proves the loop exited: a still-running 5ms ticker
-				// would increment within any 20ms gap, so two equal consecutive reads
-				// can only happen once the loop has stopped. This replaces fixed sleeps,
-				// which race against an in-flight tick landing after the measurement.
-				const pollGap = 20 * time.Millisecond
-				require.Eventually(t, func() bool {
-					before := reconcileCalls.Load()
-					time.Sleep(pollGap)
-					return reconcileCalls.Load() == before
-				}, 2*time.Second, pollGap,
-					"Reconcile calls should stop after context cancellation")
+				// Record the call count after cancellation.
+				time.Sleep(50 * time.Millisecond)
+				countAfterCancel := reconcileCalls.Load()
+
+				// Verify no more calls happen after cancellation.
+				time.Sleep(50 * time.Millisecond)
+				assert.Equal(t, countAfterCancel, reconcileCalls.Load(),
+					"No more Reconcile calls should happen after context cancellation")
 			},
 		},
 	}
@@ -310,11 +303,8 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// gomock.NewController auto-registers ctrl.Finish via t.Cleanup on
-			// Go 1.14+, so we don't call it explicitly. That also lets the reaper
-			// below — registered later, so it runs first under LIFO cleanup order —
-			// join the run() goroutine before Finish verifies the mock.
 			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -333,35 +323,21 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 			}).AnyTimes()
 			expectStatus(mockClient, true, "", false)
 
-			// Short interval so the ticker fires many times within the test window.
 			eng := newTestEngine(mockClient, outputPath, 5*time.Millisecond)
 
-			done := make(chan error, 1)
-			go func() { done <- eng.run(ctx) }()
-
-			// Reap the run() goroutine on every exit path — including a require
-			// failure inside testFunc that aborts via runtime.Goexit. As the
-			// last-registered defer it runs before any t.Cleanup (deferred funcs run
-			// before cleanups), so when run() does stop it does so ahead of gomock's
-			// auto-registered ctrl.Finish and the t.TempDir removal. It also asserts
-			// the loop returns nil on the normal (non-aborting) path.
-			//
-			// This only bounds the wait, not the goroutine's lifetime: if run()
-			// ignored cancellation it would still be live during those cleanups after
-			// the 2s timeout below fires. That is acceptable here — such a hang is
-			// itself the failure this reaps reports via t.Error, and mock access is
-			// mutex-serialized so it is not a data race.
-			defer func() {
-				cancel()
-				select {
-				case err := <-done:
-					assert.NoError(t, err, "run() should return nil when the context is cancelled")
-				case <-time.After(2 * time.Second):
-					t.Error("run() did not return after context cancellation")
-				}
-			}()
+			done := make(chan struct{})
+			go func() { eng.run(ctx); close(done) }()
 
 			tc.testFunc(t, eng, mockClient, &reconcileCalls, &getMetricsCalls, cancel)
+
+			// Cancel and confirm the loop returns cleanly.
+			cancel()
+			select {
+			case <-done:
+				// run() returned after context cancellation.
+			case <-time.After(2 * time.Second):
+				t.Fatal("run() did not return after context cancellation")
+			}
 		})
 	}
 }

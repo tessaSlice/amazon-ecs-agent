@@ -16,14 +16,8 @@
 package types
 
 const (
-	// directory holding the shared GPU metrics file
 	gpuMetricsDirPath  = "/var/run/ecs"
 	gpuMetricsFileName = "gpu-metrics.json"
-
-	// GPUMetricsFilePath is the shared file dcgm-init writes GPU metrics to and
-	// the agent reads. dcgm-init creates the parent directory and the file
-	// (empty) on demand at startup, then populates it on its first collection
-	// tick.
 	GPUMetricsFilePath = gpuMetricsDirPath + "/" + gpuMetricsFileName
 )
 
