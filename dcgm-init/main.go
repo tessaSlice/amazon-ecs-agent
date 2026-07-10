@@ -16,7 +16,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -75,19 +74,11 @@ func main() {
 	err = action.function()
 
 	if err != nil {
-		die(err, exitCodeFor(err))
+		if err, ok := err.(*engine.TerminalError); ok {
+			die(err, engine.TerminalFailureAgentExitCode)
+		}
+		die(err, engine.DefaultInitErrorExitCode)
 	}
-}
-
-// exitCodeFor maps an action error to a process exit code. A terminal error
-// (errors.Is engine.ErrGPUSupportDisabled) maps to engine.RestartPreventExitCode
-// so the unit's RestartPreventExitStatus=5 stops systemd from restart-looping;
-// all other errors map to DefaultInitErrorExitCode, which Restart=on-failure retries.
-func exitCodeFor(err error) int {
-	if errors.Is(err, engine.ErrGPUSupportDisabled) {
-		return engine.RestartPreventExitCode
-	}
-	return engine.DefaultInitErrorExitCode
 }
 
 type action struct {
