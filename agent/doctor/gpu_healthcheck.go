@@ -59,6 +59,14 @@ func (ghc *gpuHealthcheck) RunCheck() ecstcs.InstanceHealthCheckStatus {
 		return ecstcs.InstanceHealthCheckStatusInsufficientData
 	}
 
+	// A lost DCGM connection means health is unknown: dcgm-init's Healthy stays
+	// true while disconnected, so report INSUFFICIENT_DATA rather than a false OK.
+	if healthStatus.ConnectionLost {
+		seelog.Info("[GPUHealthcheck] DCGM connection lost, reporting insufficient data")
+		ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
+		return ecstcs.InstanceHealthCheckStatusInsufficientData
+	}
+
 	var resultStatus ecstcs.InstanceHealthCheckStatus
 	if healthStatus.Healthy {
 		resultStatus = ecstcs.InstanceHealthCheckStatusOk

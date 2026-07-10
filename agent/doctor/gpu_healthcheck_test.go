@@ -86,6 +86,42 @@ func TestGPUHealthcheckReportsInsufficientDataWhenFileCorrupt(t *testing.T) {
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status)
 }
 
+func TestGPUHealthcheckReportsInsufficientDataWhenFileEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	err := os.WriteFile(filePath, []byte(""), 0644)
+	require.NoError(t, err)
+
+	handler := gpu.NewDCGMHandler(filePath)
+	hc := NewGPUHealthcheck(handler)
+	status := hc.RunCheck()
+
+	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status)
+}
+
+// connection_lost=true means dcgm-init cannot determine GPU health, so the check
+// must report INSUFFICIENT_DATA even though healthy=true (dcgm-init leaves Healthy
+// true while disconnected).
+func TestGPUHealthcheckReportsInsufficientDataWhenConnectionLost(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	err := os.WriteFile(filePath, []byte(`{
+		"timestamp": "2026-01-01T00:00:00Z",
+		"healthy": true,
+		"connection_lost": true,
+		"gpus": []
+	}`), 0644)
+	require.NoError(t, err)
+
+	handler := gpu.NewDCGMHandler(filePath)
+	hc := NewGPUHealthcheck(handler)
+	status := hc.RunCheck()
+
+	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status)
+}
+
 func TestGPUHealthcheckStatusTransition(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")

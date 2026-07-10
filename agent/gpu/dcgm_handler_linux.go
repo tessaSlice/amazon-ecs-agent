@@ -16,6 +16,7 @@
 package gpu
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -43,7 +44,12 @@ type GPUMetricsFileData struct {
 	Timestamp       string      `json:"timestamp"`
 	Healthy         bool        `json:"healthy"`
 	UnhealthyReason string      `json:"unhealthy_reason,omitempty"`
-	GPUs            []GPUMetric `json:"gpus"`
+	// ConnectionLost indicates dcgm-init lost its DCGM/nv-hostengine connection
+	// (outside its grace period). When true, Healthy is not trustworthy — dcgm-init's
+	// IsHealthy() returns true while disconnected — so the reader must treat health
+	// as unknown (INSUFFICIENT_DATA) rather than OK.
+	ConnectionLost bool        `json:"connection_lost,omitempty"`
+	GPUs           []GPUMetric `json:"gpus"`
 }
 
 // GPUMetricsResult holds the parsed GPU metrics along with the timestamp
@@ -52,6 +58,7 @@ type GPUMetricsResult struct {
 	Timestamp       string
 	Healthy         bool
 	UnhealthyReason string
+	ConnectionLost  bool
 	Metrics         []GPUMetric
 }
 
@@ -72,9 +79,9 @@ func NewDCGMHandler(filePath string) *DCGMHandler {
 }
 
 // GetGPUMetrics reads and parses the GPU metrics file.
-// Returns nil if the metrics directory or file is missing, unreadable, corrupt,
-// or has an invalid timestamp. The caller is responsible for staleness detection
-// using the returned Timestamp.
+// Returns nil if the metrics directory or file is missing, unreadable, empty,
+// corrupt, or has an invalid timestamp. The caller is responsible for staleness
+// detection using the returned Timestamp.
 //
 // Before reading, it verifies (in order) that the containing directory exists,
 // that the metrics file exists inside it, and that this process can read the
@@ -112,6 +119,14 @@ func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult {
 		return nil
 	}
 
+	// 4. The file must have content. dcgm-init creates an empty file on Start
+	// before its first write, so an empty (or whitespace-only) file is the
+	// expected pre-first-write state, not a corrupt one — log at Debug.
+	if len(bytes.TrimSpace(data)) == 0 {
+		seelog.Debug("GPU metrics file is empty")
+		return nil
+	}
+
 	var fileData GPUMetricsFileData
 	if err := json.Unmarshal(data, &fileData); err != nil {
 		seelog.Warnf("Failed to parse GPU metrics file: %v", err)
@@ -128,6 +143,7 @@ func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult {
 		Timestamp:       fileData.Timestamp,
 		Healthy:         fileData.Healthy,
 		UnhealthyReason: fileData.UnhealthyReason,
+		ConnectionLost:  fileData.ConnectionLost,
 		Metrics:         fileData.GPUs,
 	}
 }
@@ -136,6 +152,7 @@ func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult {
 type GPUHealthStatus struct {
 	Healthy         bool
 	UnhealthyReason string
+	ConnectionLost  bool
 }
 
 // GetGPUHealthStatus returns the GPU health status from the shared metrics file.
@@ -148,5 +165,6 @@ func (h *DCGMHandler) GetGPUHealthStatus() *GPUHealthStatus {
 	return &GPUHealthStatus{
 		Healthy:         result.Healthy,
 		UnhealthyReason: result.UnhealthyReason,
+		ConnectionLost:  result.ConnectionLost,
 	}
 }
