@@ -367,6 +367,31 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 // fails fast (before the collection loop and before touching the DCGM client)
 // when a path exists but cannot be opened for writing. When the check passes,
 // Start() proceeds into the collection loop (which we stop with SIGTERM).
+func TestStartGPUSupportGate(t *testing.T) {
+	for _, val := range []string{"", "false", "0"} {
+		t.Run("ECS_ENABLE_GPU_SUPPORT="+val, func(t *testing.T) {
+			t.Setenv(gpuSupportEnvVar, val)
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// The client must never be touched when the gate blocks startup.
+			mockClient := mock_dcgm.NewMockClient(ctrl)
+
+			outputPath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+			eng := newTestEngine(mockClient, outputPath, time.Hour)
+
+			err := eng.Start()
+			require.Error(t, err, "Start() should fail when GPU support is not enabled")
+			assert.ErrorIs(t, err, ErrGPUSupportDisabled)
+
+			// The gate returns before creating the metrics dir/files.
+			_, statErr := os.Stat(outputPath)
+			assert.True(t, os.IsNotExist(statErr), "Start() should not create files when gated off")
+		})
+	}
+}
+
 func TestStartFilePreconditions(t *testing.T) {
 	testCases := []struct {
 		name string
@@ -397,6 +422,10 @@ func TestStartFilePreconditions(t *testing.T) {
 			if tc.unwritable != "" && os.Geteuid() == 0 {
 				t.Skip("write-permission checks are bypassed when running as root")
 			}
+
+			// Start gates on ECS_ENABLE_GPU_SUPPORT before touching files; enable it
+			// so these cases exercise the file preconditions, not the gate.
+			t.Setenv(gpuSupportEnvVar, "true")
 
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
