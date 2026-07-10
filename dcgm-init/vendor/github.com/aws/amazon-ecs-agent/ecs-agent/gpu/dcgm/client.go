@@ -318,6 +318,12 @@ type dcgmClient struct {
 	// Defaults to dcgm.FieldGroupDestroy; overridable in tests.
 	fieldGroupDestroyFunc func(dcgm.FieldHandle) error
 
+	// initFunc connects to DCGM in standalone mode for the given socket path and
+	// returns a cleanup closure that releases the native handle (nil on error).
+	// Defaults to a thin wrapper over dcgm.Init; overridable in tests so the
+	// blocking/late-success behavior can be simulated without nv-hostengine.
+	initFunc func(socketPath string) (func(), error)
+
 	// Mutex for thread-safe access to state.
 	mu sync.RWMutex
 
@@ -342,6 +348,10 @@ func NewClient(config Config) Client {
 		initializationGracePeriod: gracePeriod,
 		lastShutdown:              time.Now(),
 		fieldGroupDestroyFunc:     dcgm.FieldGroupDestroy,
+		initFunc: func(socketPath string) (func(), error) {
+			// The "1" indicates Unix domain socket connection mode (not TCP/IP).
+			return dcgm.Init(dcgm.Standalone, socketPath, "1")
+		},
 	}
 }
 
@@ -443,10 +453,8 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 		// Decrement counter when goroutine completes (success or failure).
 		defer c.pendingInitAttempts.Add(-1)
 
-		// The second parameter is the socket path and the third parameter "1" indicates
-		// Unix domain socket connection mode rather than TCP/IP. This connects to
-		// nv-hostengine via the specified Unix domain socket.
-		cleanup, err := dcgm.Init(dcgm.Standalone, c.socketPath, "1")
+		// Connect to nv-hostengine over the configured Unix domain socket.
+		cleanup, err := c.initFunc(c.socketPath)
 		resultChan <- initResult{cleanup: cleanup, err: err}
 	}()
 
@@ -471,6 +479,25 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 			"socketPath": c.socketPath,
 			"timeout":    initTimeout,
 		})
+		// The init goroutine is still running the blocking, non-cancellable
+		// dcgm.Init(). If it eventually SUCCEEDS after this timeout, it acquires
+		// a native DCGM handle (and increments the vendored process-global
+		// dcgmInitCounter) whose only release handle is the returned cleanup
+		// closure. Because we return here without reading resultChan, that
+		// cleanup would otherwise be dropped on the floor: the connection leaks
+		// and the ref-count is pinned above zero so Shutdown() can never fully
+		// release DCGM. Reap the late result and release it. The goroutine sends
+		// exactly once on the buffered channel and then exits, so this reaper
+		// unblocks after a single receive and cannot leak.
+		go func() {
+			late := <-resultChan
+			if late.err == nil && late.cleanup != nil {
+				logger.Warn("dcgm-init connection completed after timeout; releasing leaked DCGM handle", logger.Fields{
+					"socketPath": c.socketPath,
+				})
+				late.cleanup()
+			}
+		}()
 		return fmt.Errorf("timeout connecting to nv-hostengine after %v", initTimeout)
 	}
 
