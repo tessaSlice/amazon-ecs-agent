@@ -166,6 +166,75 @@ func TestClient_Reconcile_AfterGracePeriod(t *testing.T) {
 	assert.False(t, justInit, "justInit should be false when initialization fails")
 }
 
+// TestClient_initializeLocked_ReleasesConnectionOnLateSuccess is a regression
+// test for a native-handle/connection leak (CWE-404/772): when dcgm.Init()
+// completes successfully AFTER initializeLocked has already hit its timeout, the
+// returned cleanup closure — the only handle that releases the native DCGM
+// connection and decrements the vendored process-global ref-count — must still
+// be invoked. Otherwise the connection leaks and Shutdown() can never drive the
+// ref-count back to zero.
+func TestClient_initializeLocked_ReleasesConnectionOnLateSuccess(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(Config{InitializationGracePeriod: time.Minute}).(*dcgmClient)
+
+	cleanupCalled := make(chan struct{})
+	// initFunc blocks past the caller's deadline, then succeeds — simulating the
+	// blocking, non-cancellable dcgm.Init() completing after the timeout branch
+	// has already returned.
+	client.initFunc = func(socketPath string) (func(), error) {
+		time.Sleep(100 * time.Millisecond)
+		return func() { close(cleanupCalled) }, nil
+	}
+
+	// A caller deadline shorter than initFunc's delay forces the timeout branch.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	err := client.initializeLocked(ctx)
+	require.Error(t, err, "initializeLocked should return an error when init times out")
+	assert.Contains(t, err.Error(), "timeout connecting to nv-hostengine")
+
+	// The reaper goroutine must invoke cleanup once the late init succeeds,
+	// releasing the native handle rather than leaking it.
+	select {
+	case <-cleanupCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup was not called on late init success: DCGM connection leaked")
+	}
+}
+
+// TestClient_initializeLocked_LateFailureDoesNotCallCleanup verifies the reaper
+// does not invoke a (nil) cleanup when the late init FAILS — dcgm.Init returns a
+// nil cleanup on error, so there is nothing to release and no panic should occur.
+func TestClient_initializeLocked_LateFailureDoesNotCallCleanup(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(Config{InitializationGracePeriod: time.Minute}).(*dcgmClient)
+
+	cleanupCalled := make(chan struct{}, 1)
+	client.initFunc = func(socketPath string) (func(), error) {
+		time.Sleep(100 * time.Millisecond)
+		// Mirror dcgm.Init's contract: cleanup is nil on error.
+		return nil, assert.AnError
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	err := client.initializeLocked(ctx)
+	require.Error(t, err, "initializeLocked should return a timeout error")
+
+	// Give the reaper time to drain the late (failed) result; it must not call
+	// cleanup (there is none) and must not panic.
+	select {
+	case <-cleanupCalled:
+		t.Fatal("cleanup should not be called when the late init returns an error")
+	case <-time.After(300 * time.Millisecond):
+		// Expected: reaper drained the failed result and exited without cleanup.
+	}
+}
+
 // TestClient_MultipleShutdownCalls tests that multiple Shutdown calls are safe.
 func TestClient_MultipleShutdownCalls(t *testing.T) {
 	t.Parallel()
