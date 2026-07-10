@@ -195,7 +195,34 @@ func TestDCGMHandlerEmptyFile(t *testing.T) {
 
 	handler := NewDCGMHandler(filePath)
 	result := handler.GetGPUMetrics()
-	assert.Nil(t, result, "Empty file should return nil (JSON parsing fails gracefully)")
+	assert.Nil(t, result, "Empty file should return nil (pre-first-write state)")
+}
+
+func TestDCGMHandlerWhitespaceOnlyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+	os.WriteFile(filePath, []byte("   \n\t  \n"), 0644)
+
+	handler := NewDCGMHandler(filePath)
+	result := handler.GetGPUMetrics()
+	assert.Nil(t, result, "Whitespace-only file should return nil (treated as empty)")
+}
+
+func TestDCGMHandlerConnectionLost(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+	os.WriteFile(filePath, []byte(`{
+		"timestamp": "2026-01-01T00:00:00Z",
+		"healthy": true,
+		"connection_lost": true,
+		"gpus": []
+	}`), 0644)
+
+	handler := NewDCGMHandler(filePath)
+	result := handler.GetGPUMetrics()
+	require.NotNil(t, result)
+	assert.True(t, result.ConnectionLost, "connection_lost should be parsed and propagated")
+	assert.True(t, result.Healthy, "healthy stays true when disconnected; caller uses ConnectionLost")
 }
 
 // TestDCGMHandler_GetGPUMetrics_FractionalGPU_MissingFieldsInJSON verifies that

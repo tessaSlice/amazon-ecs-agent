@@ -125,7 +125,7 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 		verify         func(t *testing.T, out dcgmOutput)
 	}{
 		{
-			name: "reconcile failure leaves the existing file untouched",
+			name: "reconcile failure writes a status snapshot with ConnectionLost",
 			setupMock: func(m *mock_dcgm.MockClient, reconciles, getMetrics *atomic.Int64) {
 				m.EXPECT().Reconcile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
 					reconciles.Add(1)
@@ -135,9 +135,14 @@ func TestEngine_ReconcileAndCollect(t *testing.T) {
 					getMetrics.Add(1)
 					return nil, nil
 				}).AnyTimes()
+				expectStatus(m, true, "", true)
 			},
 			expectGetMetrics: false,
-			wantFreshWrite:   false,
+			wantFreshWrite:   true,
+			verify: func(t *testing.T, out dcgmOutput) {
+				assert.True(t, out.ConnectionLost, "reconcile failure should write ConnectionLost=true")
+				assert.Empty(t, out.GPUs, "no per-GPU metrics should be present when reconcile fails")
+			},
 		},
 		{
 			name: "GetMetrics failure writes a fresh status snapshot",
