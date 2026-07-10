@@ -21,9 +21,9 @@ const (
 	gpuMetricsFileName = "gpu-metrics.json"
 
 	// GPUMetricsFilePath is the shared file dcgm-init writes GPU metrics to and
-	// the agent reads. Its parent directory is created on demand by Start(); the
-	// file itself is created (empty) during Start() and first populated on the
-	// initial collection tick.
+	// the agent reads. dcgm-init creates the parent directory and the file
+	// (empty) on demand at startup, then populates it on its first collection
+	// tick.
 	GPUMetricsFilePath = gpuMetricsDirPath + "/" + gpuMetricsFileName
 )
 

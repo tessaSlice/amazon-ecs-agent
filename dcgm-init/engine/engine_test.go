@@ -310,8 +310,11 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			// gomock.NewController auto-registers ctrl.Finish via t.Cleanup on
+			// Go 1.14+, so we don't call it explicitly. That also lets the reaper
+			// below — registered later, so it runs first under LIFO cleanup order —
+			// join the run() goroutine before Finish verifies the mock.
 			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -338,9 +341,11 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 
 			// Reap the run() goroutine on every exit path — including a require
 			// failure inside testFunc that aborts via runtime.Goexit — so it stops
-			// touching the mock and t.TempDir before the deferred ctrl.Finish() runs.
-			// Registered after ctrl.Finish()/cancel() so LIFO runs this first, and it
-			// also asserts the loop returns nil on the normal (non-aborting) path.
+			// touching the mock and t.TempDir before those are torn down. As the
+			// last-registered defer it runs before any t.Cleanup (deferred funcs run
+			// before cleanups), so it joins run() ahead of gomock's auto-registered
+			// ctrl.Finish and the t.TempDir removal. It also asserts the loop returns
+			// nil on the normal (non-aborting) path.
 			defer func() {
 				cancel()
 				select {
