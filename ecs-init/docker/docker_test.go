@@ -27,7 +27,6 @@ import (
 	godocker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -388,6 +387,13 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 		config.OsStat = os.Stat
 	}()
 
+	mkdirAll = func(path string, perm os.FileMode) error {
+		return nil
+	}
+	defer func() {
+		mkdirAll = os.MkdirAll
+	}()
+
 	envFile := "\nECS_ENABLE_GPU_SUPPORT=true\n"
 	containerID := "container id"
 
@@ -491,30 +497,6 @@ func TestStartAgentWithGPUConfigNoDevices(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestGPUMetricsDir_MkdirAllWhenAlreadyExists verifies that ecs-init does not
-// fail when the GPU metrics directory (/var/run/ecs) already exists with 0755
-// permissions (e.g., dcgm-init created it first in a race condition).
-func TestGPUMetricsDir_MkdirAllWhenAlreadyExists(t *testing.T) {
-	// Simulate dcgm-init having already created the directory
-	gpuMetricsDir := filepath.Join(t.TempDir(), "ecs")
-	err := os.MkdirAll(gpuMetricsDir, 0755)
-	require.NoError(t, err)
-
-	info, err := os.Stat(gpuMetricsDir)
-	require.NoError(t, err)
-	require.True(t, info.IsDir())
-
-	// Simulate ecs-init calling os.MkdirAll on the same directory (as in getHostConfig)
-	err = os.MkdirAll(gpuMetricsDir, 0755)
-	assert.NoError(t, err, "os.MkdirAll should not fail when directory already exists with 0755")
-
-	// Verify directory is still intact with correct permissions
-	info, err = os.Stat(gpuMetricsDir)
-	require.NoError(t, err)
-	assert.True(t, info.IsDir())
-	assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
-}
-
 // TestGPUMetricsBindMount_PresentWhenGPUEnabled verifies that the /var/run/ecs
 // bind mount is included in the agent container's host config when GPU support is enabled.
 func TestGPUMetricsBindMount_PresentWhenGPUEnabled(t *testing.T) {
@@ -532,6 +514,13 @@ func TestGPUMetricsBindMount_PresentWhenGPUEnabled(t *testing.T) {
 	}
 	defer func() {
 		config.OsStat = os.Stat
+	}()
+
+	mkdirAll = func(path string, perm os.FileMode) error {
+		return nil
+	}
+	defer func() {
+		mkdirAll = os.MkdirAll
 	}()
 
 	envFile := "\nECS_ENABLE_GPU_SUPPORT=true\n"

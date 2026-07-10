@@ -9,6 +9,9 @@ Type=simple
 Restart=on-failure
 RestartPreventExitStatus=5
 RestartSec=10s
+# Load ECS_LOGLEVEL et al. so logger.InitSeelog() picks up the level; leading '-'
+# makes the file optional so dcgm-init still starts if it is absent.
+EnvironmentFile=-/etc/ecs/ecs.config
 ExecStart=/usr/libexec/dcgm-init start
 
 [Install]

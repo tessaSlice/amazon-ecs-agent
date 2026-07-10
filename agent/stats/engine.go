@@ -492,13 +492,10 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
 
-	// Read GPU metrics once per tick before building container metrics.
-	// Both instance-level and container-level emission share this single read.
-	// The GPU fields (gpuMetricsPublishCount, lastGPUTimestamp, currentGPUMetrics)
-	// are guarded by engine.lock because publishMetrics is invoked concurrently
-	// (one goroutine per tick) and the container-level read in
-	// taskContainerMetricsUnsafe also touches currentGPUMetrics under this lock.
-	// The lock is released before GetInstanceMetrics, which acquires it itself.
+	// Read GPU metrics once per tick, shared by instance- and container-level
+	// emission. The GPU fields are guarded by engine.lock since publishMetrics
+	// runs one goroutine per tick; the lock is released before GetInstanceMetrics
+	// (which reacquires it).
 	engine.lock.Lock()
 	engine.gpuMetricsPublishCount++
 	engine.currentGPUMetrics = nil
@@ -510,20 +507,15 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 			engine.currentGPUMetrics = gpuResult.Metrics
 		}
 	}
-	// Snapshot this tick's GPU metrics into a local while still holding the lock.
-	// The container-level path reads engine.currentGPUMetrics (also under the
-	// lock, inside GetInstanceMetrics), but the instance-level emission below
-	// uses this stable snapshot: a concurrent publishMetrics tick nils
-	// engine.currentGPUMetrics on entry, and re-reading the shared field after
-	// GetInstanceMetrics returns could observe that nil, dropping instance
-	// metrics while container metrics (read earlier) survive.
+	// Snapshot this tick's metrics under the lock. The instance-level emission
+	// below uses this stable local, not engine.currentGPUMetrics, so a concurrent
+	// tick nilling that field can't drop this tick's instance metrics.
 	gpuMetrics := engine.currentGPUMetrics
 	lastGPUTimestamp := engine.lastGPUTimestamp
 	engine.lock.Unlock()
 
-	// Trace the instance-level GPU read outcome so field debugging can tell
-	// whether this tick fetched fresh metrics from dcgm-init, was throttled by
-	// the 3-tick gate, or was dropped by the staleness guard.
+	// Trace the per-tick GPU read outcome (fresh fetch vs. 3-tick gate vs.
+	// staleness guard) for field debugging.
 	seelog.Infof("GPU instance metrics read: gpuCount=%d, lastGPUTimestamp=%q",
 		len(gpuMetrics), lastGPUTimestamp)
 
@@ -1022,19 +1014,15 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 	return containerMetrics, nil
 }
 
-// instanceGPUPayload returns the instance-level GPU telemetry payload built from
-// the given per-tick GPU metrics snapshot, or nil if there are none. It reads
-// engine.tasksToContainers under engine.lock, but uses the caller-provided
-// snapshot for the GPU metrics so it stays consistent with the container-level
-// emission from the same tick and cannot be nilled by a concurrent
-// publishMetrics tick.
+// instanceGPUPayload builds the instance-level GPU payload from the caller's
+// per-tick snapshot (nil if empty), reading engine.tasksToContainers under the
+// lock. It uses the passed snapshot rather than engine.currentGPUMetrics so a
+// concurrent tick can't nil it.
 //
-// The payload is emitted without any wrapper dimensions: the TACS backend stamps
-// the instance-scoping dimensions (ClusterName / CapacityProviderName /
-// ContainerInstanceId / EC2InstanceId) onto the instance metric itself. Attaching
-// them here caused the backend's dimension-set filter to drop the wrapper on
-// direct EC2 launches (no CapacityProviderName), so the metrics never reached
-// CloudWatch.
+// The payload carries no wrapper dimensions: the TACS backend stamps the
+// instance-scoping dimensions itself, and attaching them here made its
+// dimension-set filter drop the wrapper on direct EC2 launches (no
+// CapacityProviderName), so the metrics never reached CloudWatch.
 func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gpu.GPUMetric) []*ecstcs.GeneralMetricsWrapper {
 	if len(gpuMetrics) == 0 {
 		return nil

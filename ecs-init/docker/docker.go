@@ -42,9 +42,10 @@ const (
 	// when creating the Agent container
 	readOnly = ":ro"
 	// gpuMetricsDir is the host directory that dcgm-init writes GPU metrics into
-	// and the Agent container reads them from. It is created by the ecs-init
-	// package install, so it always exists and can be bind-mounted directly.
+	// and the Agent container reads them from.
 	gpuMetricsDir = "/var/run/ecs"
+	// 0755 so the Agent container can traverse the bind-mounted dir to read the file.
+	gpuMetricsDirPerm = 0755
 	// hostProcDir binds the host's /proc directory to /host/proc within the
 	// ECS Agent container
 	// The ECS Agent needs access to host's /proc directory when configuring
@@ -169,6 +170,7 @@ var (
 	execCommand                   = exec.Command
 	execLookPath                  = exec.LookPath
 	checkNvidiaGPUDevicesPresence = nvidiaGPUDevicesPresent
+	mkdirAll                      = os.MkdirAll
 	// ErrNoBridgeNetwork indicates no docker bridge network interface was found
 	ErrNoBridgeNetwork = errors.New(
 		"unable to find any virtual docker bridge network interfaces on the host")
@@ -490,11 +492,13 @@ func (c *client) getHostConfig(envVarsFromFiles map[string]string) *godocker.Hos
 			if nvidiaGPUDevicesPresent() {
 				// bind mount gpu info dir
 				binds = append(binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
-				// Bind mount the gpu metrics directory (written by dcgm-init, read
-				// by ecs-agent). The directory is created by the ecs-init package
-				// install (see the ecs-agent.spec %install section), so ecs-init no
-				// longer needs to create it here.
-				binds = append(binds, gpuMetricsDir+":"+gpuMetricsDir+readOnly)
+				// Create the gpu metrics dir before binding it; otherwise Docker
+				// would create the missing mount source root-owned.
+				if err := mkdirAll(gpuMetricsDir, gpuMetricsDirPerm); err != nil {
+					log.Warnf("Failed to create GPU metrics directory %s, skipping bind mount: %v", gpuMetricsDir, err)
+				} else {
+					binds = append(binds, gpuMetricsDir+":"+gpuMetricsDir+readOnly)
+				}
 			}
 		}
 

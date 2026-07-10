@@ -35,8 +35,8 @@ import (
 
 // newTestEngine builds an Engine wired to a mock client, writing to outputPath
 // and ticking at collectionInterval, so tests can redirect writes to a temp
-// directory and shrink the ticker instead of touching /var/run/ecs or waiting a
-// full production interval.
+// directory and shrink the ticker instead of touching the production metrics
+// path or waiting a full production interval.
 func newTestEngine(client *mock_dcgm.MockClient, outputPath string, collectionInterval time.Duration) *Engine {
 	return &Engine{
 		client:             client,
