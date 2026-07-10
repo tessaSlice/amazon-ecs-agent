@@ -120,19 +120,14 @@ func GPUMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper
 	}
 }
 
-// gpuMetricsToInstancePayload converts a slice of GPUMetrics to instance-level
-// GeneralMetricsWrapper entries containing InstanceGPULimit and InstanceGPUUsageTotal.
-// The usageTotal parameter is the pre-computed count of unique GPU device IDs assigned
-// to running task containers. Returns nil if the input slice is empty.
+// GPUMetricsToInstancePayload builds the instance-level GeneralMetricsWrapper
+// (InstanceGPULimit + InstanceGPUUsageTotal, where usageTotal is the count of
+// unique assigned GPU device IDs), or nil if metrics is empty.
 //
-// The wrapper is emitted WITHOUT any Dimensions. Instance-level metrics are scoped
-// per instance in CloudWatch by the TACS backend, which stamps ClusterName /
-// CapacityProviderName / ContainerInstanceId / EC2InstanceId onto the InstanceMetricsModel
-// from its own instance record. Attaching those keys as wrapper dimensions here is at
-// best redundant and, on a direct EC2 launch (no CapacityProviderName), causes the
-// backend's dimension-set filter to drop the entire instance wrapper, so InstanceGPULimit
-// and InstanceGPUUsageTotal never reach CloudWatch. A dimensionless wrapper is always
-// retained and lands under the ClusterName dimension set.
+// The wrapper carries NO Dimensions: the TACS backend stamps the instance-scoping
+// dimensions itself, and attaching them here makes its dimension-set filter drop
+// the wrapper on a direct EC2 launch (no CapacityProviderName). A dimensionless
+// wrapper is always retained and lands under the ClusterName dimension set.
 func GPUMetricsToInstancePayload(metrics []GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 {
 		return nil

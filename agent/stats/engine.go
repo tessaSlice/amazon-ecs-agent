@@ -498,9 +498,8 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 	// stable per-tick snapshot for the instance-level emission below.
 	gpuMetrics, lastGPUTimestamp := engine.snapshotGPUMetrics()
 
-	// Trace the instance-level GPU read outcome so field debugging can tell
-	// whether this tick fetched fresh metrics from dcgm-init, was throttled by
-	// the 3-tick gate, or was dropped by the staleness guard.
+	// Trace the per-tick GPU read outcome (fresh fetch vs. 3-tick gate vs.
+	// staleness guard) for field debugging.
 	seelog.Infof("GPU instance metrics read: gpuCount=%d, lastGPUTimestamp=%q",
 		len(gpuMetrics), lastGPUTimestamp)
 
@@ -1028,12 +1027,10 @@ func (engine *DockerStatsEngine) snapshotGPUMetrics() ([]gpu.GPUMetric, string) 
 // emission from the same tick and cannot be nilled by a concurrent
 // publishMetrics tick.
 //
-// The payload is emitted without any wrapper dimensions: the TACS backend stamps
-// the instance-scoping dimensions (ClusterName / CapacityProviderName /
-// ContainerInstanceId / EC2InstanceId) onto the instance metric itself. Attaching
-// them here caused the backend's dimension-set filter to drop the wrapper on
-// direct EC2 launches (no CapacityProviderName), so the metrics never reached
-// CloudWatch.
+// The payload carries no wrapper dimensions: the TACS backend stamps the
+// instance-scoping dimensions itself, and attaching them here made its
+// dimension-set filter drop the wrapper on direct EC2 launches (no
+// CapacityProviderName), so the metrics never reached CloudWatch.
 func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gpu.GPUMetric) []*ecstcs.GeneralMetricsWrapper {
 	if len(gpuMetrics) == 0 {
 		return nil

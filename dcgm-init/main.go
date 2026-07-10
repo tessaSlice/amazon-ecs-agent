@@ -33,6 +33,9 @@ const (
 	START   = "start"
 )
 
+// logFilePath is dcgm-init's own log file in the shared ECS log dir.
+const logFilePath = "/var/log/ecs/dcgm-init.log"
+
 func main() {
 	flag.Parse()
 	args := flag.Args()
@@ -43,6 +46,9 @@ func main() {
 	}
 
 	logger.InitSeelog()
+	// InitSeelog picks up ECS_LOGLEVEL from ecs.config; override ECS_LOGFILE
+	// (which points at the agent's log) so dcgm-init logs to its own file.
+	logger.SetConfigLogFile(logFilePath)
 	defer seelog.Flush()
 	if args[0] == VERSION {
 		err := version.PrintVersion()

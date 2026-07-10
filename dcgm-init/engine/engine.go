@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -35,38 +36,32 @@ const (
 )
 
 const (
-	// MetricsFilePath is the shared file dcgm-init writes GPU metrics to and the
-	// agent reads. Its parent directory is expected to already exist (the
-	// dcgm-init systemd unit provisions it); dcgm-init does not create it.
+	// MetricsFilePath is the shared file dcgm-init writes and the agent reads.
+	// /var/run/ecs is tmpfs, so Start MkdirAll's the dir each boot rather than
+	// relying on the RPM or a tmpfiles rule.
 	MetricsFilePath = "/var/run/ecs/gpu-metrics.json"
 
-	// metricsFilePermission is the permission for the metrics file and its
-	// staging temp file. 0644 keeps the file world-readable so the agent can
-	// consume it; only dcgm-init (running as root) writes it.
+	// 0755 so the agent can traverse the bind-mounted dir to read the file.
+	metricsDirPermission os.FileMode = 0755
+
+	// 0644 so the file is world-readable for the agent; only dcgm-init writes it.
 	metricsFilePermission os.FileMode = 0644
 
-	// metricsCollectionInterval is how often GPU metrics are collected and
-	// written. The agent samples the file at roughly this cadence, so writing
-	// more frequently would not surface additional data downstream.
+	// metricsCollectionInterval matches the agent's sampling cadence.
 	metricsCollectionInterval = 60 * time.Second
 )
 
-// Engine drives the dcgm-init metrics collection loop: it connects to DCGM via
-// the dcgm.Client, periodically collects GPU metrics, and writes them to a
-// shared JSON file that the agent reads.
-//
-// outputPath and collectionInterval default to the package constants in New()
-// and are only overridden in tests, so they can redirect writes to a temp
-// directory and shrink the ticker without waiting a full production interval.
+// Engine periodically collects GPU metrics from DCGM and writes them to a shared
+// JSON file the agent reads. outputPath and collectionInterval default to the
+// package constants; tests override them to redirect writes and shrink the ticker.
 type Engine struct {
 	client             dcgm.Client
 	outputPath         string
 	collectionInterval time.Duration
 }
 
-// New creates an instance of Engine. The DCGM client is created here but does
-// not connect until the first Reconcile inside the collection loop, so New is
-// cheap and does not fail on hosts where nv-hostengine is not yet up.
+// New creates an Engine. The DCGM client connects lazily on the first Reconcile,
+// so New is cheap and does not fail when nv-hostengine is not yet up.
 func New() (*Engine, error) {
 	return &Engine{
 		client:             dcgm.NewClient(dcgm.Config{}),
@@ -81,25 +76,24 @@ func (e *Engine) tempPath() string {
 	return e.outputPath + ".tmp"
 }
 
-// Start runs the metrics collection loop until a SIGTERM/SIGINT is received
-// (systemd's default stop sends SIGTERM). The metrics file and its staging temp
-// file are expected to already exist and be writable (provisioned by the
-// dcgm-init systemd unit / package install).
+// Start runs the collection loop until SIGTERM/SIGINT (systemd's default stop
+// sends SIGTERM); there is no separate "stop" command.
 func (e *Engine) Start() error {
-	// Verify both the metrics file and its staging temp file exist and are
-	// writable before starting; exit early rather than run a collection loop
-	// whose writes would fail on every tick.
+	// Create the metrics dir at runtime (not shipped in the RPM); no-op if present.
+	metricsDir := filepath.Dir(e.outputPath)
+	if err := os.MkdirAll(metricsDir, metricsDirPermission); err != nil {
+		return fmt.Errorf("dcgm-init could not create metrics directory %s: %w", metricsDir, err)
+	}
+
+	// Fail fast if the metrics files can't be opened, rather than failing every
+	// tick. ensureWritable creates them if missing.
 	for _, path := range []string{e.outputPath, e.tempPath()} {
 		if err := ensureWritable(path); err != nil {
 			return fmt.Errorf("dcgm-init required metrics file %s is missing or not writable: %w", path, err)
 		}
 	}
 
-	// Cancel the context when a shutdown signal arrives so the run loop unwinds
-	// cleanly. There is no separate "stop" command; shutdown is signal-driven
-	// (systemd's default stop sends SIGTERM). NotifyContext installs the signal
-	// handler and returns a context that is cancelled on SIGINT/SIGTERM; stop
-	// removes the handler when we return.
+	// A shutdown signal cancels ctx, unwinding the run loop.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -147,15 +141,11 @@ type dcgmOutput struct {
 	GPUs           []gputypes.GPUMetric `json:"gpus"`
 }
 
-// reconcileAndCollect reconciles the DCGM connection, pulls the latest metrics from
-// the client, and writes them to the shared output file atomically: it stages
-// the data into the temp file and then renames it onto the final path so a
-// reader (the agent) never observes a partially written file.
-//
-// A failure to reconcile or collect is not fatal: we still write a fresh status
-// snapshot reflecting the current health and connection state so the shared
-// file does not silently go stale. Only a marshal or write/rename failure is
-// returned as an error.
+// reconcileAndCollect reconciles the DCGM connection, collects the latest
+// metrics, and writes them to the output file via a temp-file+rename so a reader
+// never sees a partial file. A reconcile/collect failure is not fatal — it still
+// writes a status snapshot so the file doesn't go stale; only marshal or
+// write/rename failures are returned.
 func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 	if _, err := e.client.Reconcile(ctx); err != nil {
 		logger.Warn("dcgm-init DCGM reconciliation failed, skipping metrics collection", logger.Fields{"error": err})
@@ -164,7 +154,7 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 
 	metrics, err := e.client.GetMetrics(ctx)
 	if err != nil {
-		// Keep going with no per-GPU metrics; the health/connection fields (implemented later can convey information)
+		// Write a status-only snapshot; the health/connection fields still apply.
 		logger.Warn("dcgm-init failed to collect GPU metrics, writing status only", logger.Fields{"error": err})
 		metrics = []gputypes.GPUMetric{}
 	}
@@ -183,9 +173,7 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 		return fmt.Errorf("dcgm-init failed to marshal metrics: %w", err)
 	}
 
-	// Write to the temp file and then atomically rename it onto the final path.
-	// The reader always consumes outputPath; the temp file is only the transient
-	// write target that the rename moves into place.
+	// Stage into the temp file, then atomically rename onto outputPath.
 	tempPath := e.tempPath()
 	if err := os.WriteFile(tempPath, data, metricsFilePermission); err != nil {
 		return fmt.Errorf("dcgm-init failed to write metrics to %s: %w", tempPath, err)
@@ -198,14 +186,10 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 	return nil
 }
 
-// ensureWritable makes sure path exists and is writable, creating it (empty) if
-// it is missing. It opens the file for writing with O_CREATE (but not O_TRUNC),
-// so a missing file is created while an existing file is left untouched; a
-// directory or insufficient permissions still surface as an error. Creating a
-// missing file is required because the atomic write in reconcileAndCollect
-// renames the .tmp staging file onto the output path, consuming it — so on a
-// later start the .tmp file no longer exists and must be recreated rather than
-// treated as a fatal precondition failure.
+// ensureWritable opens path with O_CREATE (not O_TRUNC): missing files are
+// created empty, existing ones left intact, dir/permission problems surface as
+// errors. Creating matters because reconcileAndCollect's rename consumes the
+// .tmp file, so it is absent on a later Start.
 func ensureWritable(path string) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, metricsFilePermission)
 	if err != nil {
