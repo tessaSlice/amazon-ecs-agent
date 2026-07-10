@@ -8,6 +8,10 @@ ConditionPathExists=/usr/bin/nv-hostengine
 Type=simple
 Restart=on-failure
 RestartSec=10s
+# Load ECS_LOGLEVEL (and other ECS settings) from the shared agent config, the
+# same file ecs.service reads. The leading '-' makes it optional so dcgm-init
+# still starts if the file is absent. dcgm-init's logger reads ECS_LOGLEVEL.
+EnvironmentFile=-/etc/ecs/ecs.config
 ExecStart=/usr/libexec/dcgm-init start
 
 [Install]
