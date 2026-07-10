@@ -340,12 +340,17 @@ func TestEngine_PeriodicCollection(t *testing.T) {
 			go func() { done <- eng.run(ctx) }()
 
 			// Reap the run() goroutine on every exit path — including a require
-			// failure inside testFunc that aborts via runtime.Goexit — so it stops
-			// touching the mock and t.TempDir before those are torn down. As the
+			// failure inside testFunc that aborts via runtime.Goexit. As the
 			// last-registered defer it runs before any t.Cleanup (deferred funcs run
-			// before cleanups), so it joins run() ahead of gomock's auto-registered
-			// ctrl.Finish and the t.TempDir removal. It also asserts the loop returns
-			// nil on the normal (non-aborting) path.
+			// before cleanups), so when run() does stop it does so ahead of gomock's
+			// auto-registered ctrl.Finish and the t.TempDir removal. It also asserts
+			// the loop returns nil on the normal (non-aborting) path.
+			//
+			// This only bounds the wait, not the goroutine's lifetime: if run()
+			// ignored cancellation it would still be live during those cleanups after
+			// the 2s timeout below fires. That is acceptable here — such a hang is
+			// itself the failure this reaps reports via t.Error, and mock access is
+			// mutex-serialized so it is not a data race.
 			defer func() {
 				cancel()
 				select {
