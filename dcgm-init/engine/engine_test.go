@@ -594,6 +594,7 @@ func TestStartGPUSupportGate(t *testing.T) {
 // is touched.
 func TestStartCreatesMetricsDirectory(t *testing.T) {
 	t.Run("missing directory is created", func(t *testing.T) {
+		t.Setenv(gpuSupportEnvVar, "true")
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
@@ -709,6 +710,7 @@ func TestStartCreatesMetricsDirectory(t *testing.T) {
 	})
 
 	t.Run("uncreatable directory fails fast", func(t *testing.T) {
+		t.Setenv(gpuSupportEnvVar, "true")
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
