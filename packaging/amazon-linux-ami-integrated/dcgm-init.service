@@ -7,8 +7,8 @@ ConditionPathExists=/usr/bin/nv-hostengine
 [Service]
 Type=simple
 Restart=on-failure
-# dcgm-init exits 5 (RestartPreventExitCode) when ECS_ENABLE_GPU_SUPPORT is not
-# "true" — a terminal state restarting cannot fix — so systemd must not restart-loop it.
+# dcgm-init exits 5 (TerminalFailureAgentExitCode) when ECS_ENABLE_GPU_SUPPORT is
+# not "true" — a terminal state restarting cannot fix — so systemd must not restart-loop it.
 RestartPreventExitStatus=5
 RestartSec=10s
 # Load ECS_ENABLE_GPU_SUPPORT (the start gate) and ECS_LOGLEVEL from ecs.config;

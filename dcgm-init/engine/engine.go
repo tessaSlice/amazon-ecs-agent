@@ -18,7 +18,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -32,24 +31,27 @@ import (
 )
 
 const (
+	// TerminalFailureAgentExitCode is the exit code for an unrecoverable, terminal
+	// failure. main maps a *TerminalError to it, which matches the systemd unit's
+	// RestartPreventExitStatus=5 so systemd does not restart-loop dcgm-init on a
+	// host where GPU support is intentionally off.
+	TerminalFailureAgentExitCode = 5
 	// DefaultInitErrorExitCode is the exit code used for general init errors.
 	DefaultInitErrorExitCode = -1
-
-	// RestartPreventExitCode signals an unrecoverable, terminal failure. main
-	// maps errors wrapping ErrGPUSupportDisabled to this code, which matches the
-	// systemd unit's RestartPreventExitStatus=5 so systemd does not restart-loop
-	// dcgm-init on a host where GPU support is intentionally off.
-	RestartPreventExitCode = 5
 
 	// gpuSupportEnvVar gates dcgm-init the same way ecs-init gates the NVIDIA GPU
 	// manager: metrics collection only runs when the AMI/instance opts in.
 	gpuSupportEnvVar = "ECS_ENABLE_GPU_SUPPORT"
 )
 
-// ErrGPUSupportDisabled is a terminal error returned by Start when
-// ECS_ENABLE_GPU_SUPPORT is not "true". It is unrecoverable (restarting will not
-// change the env), so main exits with RestartPreventExitCode.
-var ErrGPUSupportDisabled = errors.New("dcgm-init: ECS_ENABLE_GPU_SUPPORT is not enabled")
+type TerminalError struct {
+	err      string
+	exitCode int
+}
+
+func (e *TerminalError) Error() string {
+	return fmt.Sprintf("%s: %d", e.err, e.exitCode)
+}
 
 const (
 	// MetricsFilePath is the shared file dcgm-init writes and the agent reads.
@@ -98,7 +100,10 @@ func (e *Engine) Start() error {
 	// Gate on ECS_ENABLE_GPU_SUPPORT, mirroring how ecs-init gates the NVIDIA GPU
 	// manager. When off, return a terminal error so systemd does not restart-loop.
 	if os.Getenv(gpuSupportEnvVar) != "true" {
-		return ErrGPUSupportDisabled
+		return &TerminalError{
+			err:      "dcgm-init: ECS_ENABLE_GPU_SUPPORT is not enabled",
+			exitCode: TerminalFailureAgentExitCode,
+		}
 	}
 
 	// Create the metrics dir at runtime (not shipped in the RPM); no-op if present.
