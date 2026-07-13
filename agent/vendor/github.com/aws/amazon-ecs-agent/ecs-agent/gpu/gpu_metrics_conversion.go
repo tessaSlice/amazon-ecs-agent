@@ -97,11 +97,17 @@ func GPUMetricToGeneralMetricsWrapper(m GPUMetric) *ecstcs.GeneralMetricsWrapper
 			Unit:              aws.String(gpuMetricUnitNone),
 		})
 	}
-	if len(generalMetrics) == 0 {
+	// Return nil only when there is neither any telemetry nor a GPU identity to
+	// attach to: without a UUID we cannot build a valid per-device dimension.
+	// When the GPU is identifiable we still emit below, even if every telemetry
+	// field is nil, so the always-on XID count is not dropped.
+	if len(generalMetrics) == 0 && m.GPUUUID == "" {
 		return nil
 	}
 
 	// Always include RESTART_APP XID count so customers see 0 instead of "No Data".
+	// This must be appended after the emptiness check above, not before, so an
+	// identifiable GPU whose other telemetry is all nil still reports its XID count.
 	xidCount := m.RestartAppXidCount
 	generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
 		MetricName:      aws.String(gpuMetricNameGPURestartAppXidCount),
