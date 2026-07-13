@@ -41,9 +41,9 @@ const (
 
 // GPUMetricsFileData represents the JSON structure written by dcgm-init.
 type GPUMetricsFileData struct {
-	Timestamp       string      `json:"timestamp"`
-	Healthy         bool        `json:"healthy"`
-	UnhealthyReason string      `json:"unhealthy_reason,omitempty"`
+	Timestamp       string `json:"timestamp"`
+	Healthy         bool   `json:"healthy"`
+	UnhealthyReason string `json:"unhealthy_reason,omitempty"`
 	// ConnectionLost indicates dcgm-init lost its DCGM/nv-hostengine connection
 	// (outside its grace period). When true, Healthy is not trustworthy — dcgm-init's
 	// IsHealthy() returns true while disconnected — so the reader must treat health
@@ -148,11 +148,15 @@ func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult {
 	}
 }
 
-// GPUHealthStatus holds the health state from the GPU metrics file.
+// GPUHealthStatus holds the health state from the GPU metrics file. Timestamp is
+// the RFC3339 time dcgm-init last wrote the file, exposed so the health check can
+// detect a stale file (dcgm-init dead or hung) — connection_lost only covers a
+// lost DCGM connection while dcgm-init is still alive to report it.
 type GPUHealthStatus struct {
 	Healthy         bool
 	UnhealthyReason string
 	ConnectionLost  bool
+	Timestamp       string
 }
 
 // GetGPUHealthStatus returns the GPU health status from the shared metrics file.
@@ -166,5 +170,6 @@ func (h *DCGMHandler) GetGPUHealthStatus() *GPUHealthStatus {
 		Healthy:         result.Healthy,
 		UnhealthyReason: result.UnhealthyReason,
 		ConnectionLost:  result.ConnectionLost,
+		Timestamp:       result.Timestamp,
 	}
 }
