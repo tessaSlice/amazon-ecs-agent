@@ -61,9 +61,26 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			expectedIsDoubles: []bool{true, true, false, false, true, true, false},
 		},
 		{
-			name: "all fields nil",
+			// An identifiable GPU (non-empty UUID) with all telemetry nil still
+			// emits the always-on RESTART_APP XID count, so customers see 0
+			// rather than "No Data".
+			name: "all telemetry nil but UUID present emits XID count",
 			metric: GPUMetric{
 				GPUUUID: "GPU-nil-all",
+			},
+			expectNil:         false,
+			expectedCount:     1,
+			expectedDimValue:  "GPU-nil-all",
+			expectedNames:     []string{"GPURestartAppXidCount"},
+			expectedUnits:     []string{"Count"},
+			expectedIsDoubles: []bool{false},
+		},
+		{
+			// With neither telemetry nor a UUID there is no device to attach a
+			// dimension to, so the wrapper is dropped.
+			name: "all telemetry nil and no UUID returns nil",
+			metric: GPUMetric{
+				GPUUUID: "",
 			},
 			expectNil: true,
 		},
@@ -392,12 +409,15 @@ func TestGpuMetricsForContainer(t *testing.T) {
 			expectedUUIDs: []string{"GPU-2"},
 		},
 		{
-			name: "matching UUID but all nil fields returns nil",
+			// A matched GPU with all telemetry nil still emits the always-on XID
+			// count (it has a UUID to dimension by), so it is not dropped.
+			name: "matching UUID but all telemetry nil still emits XID count",
 			metrics: []GPUMetric{
-				{GPUUUID: "GPU-1"}, // all nil fields
+				{GPUUUID: "GPU-1"}, // all telemetry fields nil
 			},
-			deviceIDs: []string{"GPU-1"},
-			expectNil: true,
+			deviceIDs:     []string{"GPU-1"},
+			expectNil:     false,
+			expectedUUIDs: []string{"GPU-1"},
 		},
 		{
 			name: "all UUIDs match",
