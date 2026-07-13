@@ -124,9 +124,6 @@ type DockerStatsEngine struct {
 	gpuMetricsPublishCount int
 	// lastGPUTimestamp tracks the last timestamp emitted to TACS to prevent emitting stale data.
 	lastGPUTimestamp string
-	// currentGPUMetrics holds the GPU metrics for the current publish tick,
-	// read once and shared between instance-level and container-level emission.
-	currentGPUMetrics []gpu.GPUMetric
 }
 
 // ResolveTask resolves the api task object, given container id.
@@ -493,17 +490,19 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 	defer cancel()
 
 	// Read GPU metrics once per tick before building container metrics.
-	// snapshotGPUMetrics guards the shared GPU fields with a deferred unlock so
-	// the lock is released even if the collector call panics, and returns a
-	// stable per-tick snapshot for the instance-level emission below.
-	gpuMetrics, lastGPUTimestamp := engine.snapshotGPUMetrics()
+	// snapshotGPUMetrics takes engine.lock with a deferred unlock so the lock is
+	// released even if the collector call panics, and returns a stable per-tick
+	// snapshot for the instance- and container-level emission. fresh is true when
+	// this tick read a newer-than-last sample; the de-dup cursor is advanced only
+	// after the message is sent (see below).
+	gpuMetrics, gpuTimestamp, gpuFresh := engine.snapshotGPUMetrics()
 
 	// Trace the per-tick GPU read outcome (fresh fetch vs. 3-tick gate vs.
 	// staleness guard) for field debugging.
-	seelog.Infof("GPU instance metrics read: gpuCount=%d, lastGPUTimestamp=%q",
-		len(gpuMetrics), lastGPUTimestamp)
+	seelog.Infof("GPU instance metrics read: gpuCount=%d, gpuTimestamp=%q, fresh=%t",
+		len(gpuMetrics), gpuTimestamp, gpuFresh)
 
-	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
+	metricsMetadata, taskMetrics, metricsErr := engine.getInstanceMetrics(includeServiceConnectStats, gpuMetrics)
 	if metricsErr == nil {
 		metricsMessage := ecstcs.TelemetryMessage{
 			Metadata:    metricsMetadata,
@@ -524,6 +523,12 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 		select {
 		case engine.metricsChannel <- metricsMessage:
 			seelog.Debugf("sent telemetry message")
+			// Only now that the message is sent do we advance the de-dup cursor,
+			// so a fresh sample whose send was skipped/timed out is retried next
+			// cycle rather than being dropped forever.
+			if gpuFresh {
+				engine.commitGPUTimestamp(gpuTimestamp)
+			}
 		case <-publishMetricsCtx.Done():
 			seelog.Errorf("timeout sending telemetry message, discarding metrics")
 		}
@@ -554,6 +559,15 @@ func (engine *DockerStatsEngine) publishHealth() {
 
 // GetInstanceMetrics gets all task metrics and instance metadata from stats engine.
 func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
+	// No per-tick GPU snapshot on this path (idle probe, tests, non-GPU
+	// callers). publishMetrics uses getInstanceMetrics directly to pass one.
+	return engine.getInstanceMetrics(includeServiceConnectStats, nil)
+}
+
+// getInstanceMetrics gets all task metrics and instance metadata. gpuMetrics is
+// the stable per-tick GPU snapshot (may be nil) threaded to the container-level
+// GPU emission so it cannot be nilled by a concurrent publishMetrics tick.
+func (engine *DockerStatsEngine) getInstanceMetrics(includeServiceConnectStats bool, gpuMetrics []gpu.GPUMetric) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
 	idle := engine.isIdle()
 	metricsMetadata := &ecstcs.MetricsMetadata{
 		Cluster:           aws.String(engine.cluster),
@@ -583,7 +597,7 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 	taskStatsToCollect := engine.getTaskStatsToCollect()
 	for taskArn := range taskStatsToCollect {
 		_, isServiceConnectTask := engine.taskToServiceConnectStats[taskArn]
-		containerMetrics, err := engine.taskContainerMetricsUnsafe(taskArn)
+		containerMetrics, err := engine.taskContainerMetricsUnsafe(taskArn, gpuMetrics)
 		if err != nil {
 			seelog.Debugf("Error getting container metrics for task: %s, err: %v", taskArn, err)
 			// skip collecting service connect related metrics, if task is not service connect enabled.
@@ -847,9 +861,11 @@ func newDockerContainerMetadataResolver(taskEngine ecsengine.TaskEngine) (*Docke
 }
 
 // taskContainerMetricsUnsafe gets all container metrics for a task arn.
+// gpuMetrics is the stable per-tick GPU snapshot (may be nil) used for
+// container-level GPU emission so it stays consistent with the instance payload.
 //
 //gocyclo:ignore
-func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*ecstcs.ContainerMetric, error) {
+func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string, gpuMetrics []gpu.GPUMetric) ([]*ecstcs.ContainerMetric, error) {
 	containerMap, taskExists := engine.tasksToContainers[taskArn]
 	if !taskExists {
 		return nil, fmt.Errorf("task not found")
@@ -976,18 +992,17 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 				}
 			}
 		}
-		// Add GPU metrics for containers with assigned GPUs.
-		// Uses currentGPUMetrics which was read once during publishMetrics.
-		if len(engine.currentGPUMetrics) > 0 {
-			if task, taskErr := engine.resolver.ResolveTask(dockerID); taskErr == nil {
-				if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
-					gpuIDs := dockerContainer.Container.GPUIDs
-					if len(gpuIDs) > 0 {
-						gpuPayload := gpuconvert.GPUMetricsForContainer(engine.currentGPUMetrics, gpuIDs)
-						if len(gpuPayload) > 0 {
-							containerMetric.GeneralMetricsPayload = gpuPayload
-						}
-						_ = task // suppress unused warning
+		// Add GPU metrics for containers with assigned GPUs, using the caller's
+		// stable per-tick snapshot. Passing the snapshot (rather than re-reading
+		// shared engine state) keeps the container-level emission consistent with
+		// the instance-level payload built from the same tick.
+		if len(gpuMetrics) > 0 {
+			if dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID); containerErr == nil {
+				gpuIDs := dockerContainer.Container.GPUIDs
+				if len(gpuIDs) > 0 {
+					gpuPayload := gpuconvert.GPUMetricsForContainer(gpuMetrics, gpuIDs)
+					if len(gpuPayload) > 0 {
+						containerMetric.GeneralMetricsPayload = gpuPayload
 					}
 				}
 			}
@@ -998,26 +1013,43 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 	return containerMetrics, nil
 }
 
-// snapshotGPUMetrics advances the per-tick GPU state and returns a stable
-// snapshot of the current metrics. It reads dcgm-init's metrics at most once
-// every 3 ticks (~60s), updating the shared engine.currentGPUMetrics/
-// lastGPUTimestamp fields. The lock is released via defer so it is freed even if
+// snapshotGPUMetrics reads a stable per-tick GPU snapshot. It fetches dcgm-init's
+// metrics at most once every 3 ticks (~60s) and returns them along with their
+// timestamp and a fresh flag (true when this tick read a newer-than-last sample).
+//
+// It deliberately does NOT advance engine.lastGPUTimestamp: the de-dup cursor is
+// committed only after the telemetry message is successfully sent (see
+// commitGPUTimestamp), so a fresh sample whose message is dropped (empty task
+// metrics, or a send timeout) is retried on the next cycle rather than being
+// permanently skipped. The lock is released via defer so it is freed even if
 // engine.dcgmHandler.GetGPUMetrics() panics.
-func (engine *DockerStatsEngine) snapshotGPUMetrics() ([]gpu.GPUMetric, string) {
+func (engine *DockerStatsEngine) snapshotGPUMetrics() (metrics []gpu.GPUMetric, timestamp string, fresh bool) {
 	engine.lock.Lock()
 	defer engine.lock.Unlock()
 
 	engine.gpuMetricsPublishCount++
-	engine.currentGPUMetrics = nil
 	if engine.gpuMetricsPublishCount >= 3 {
 		engine.gpuMetricsPublishCount = 0
 		gpuResult := engine.dcgmHandler.GetGPUMetrics()
 		if gpuResult != nil && len(gpuResult.Metrics) > 0 && gpuResult.Timestamp > engine.lastGPUTimestamp {
-			engine.lastGPUTimestamp = gpuResult.Timestamp
-			engine.currentGPUMetrics = gpuResult.Metrics
+			return gpuResult.Metrics, gpuResult.Timestamp, true
 		}
 	}
-	return engine.currentGPUMetrics, engine.lastGPUTimestamp
+	// Not a fresh-fetch tick (throttled by the 3-tick gate or the sample was
+	// stale/empty): emit no GPU metrics this tick.
+	return nil, engine.lastGPUTimestamp, false
+}
+
+// commitGPUTimestamp advances the de-dup cursor to the given snapshot timestamp
+// after its telemetry message has been sent, so subsequent ticks reading the
+// same dcgm-init file are treated as stale. Guarded against regressing the
+// cursor if a stale value is ever passed.
+func (engine *DockerStatsEngine) commitGPUTimestamp(timestamp string) {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+	if timestamp > engine.lastGPUTimestamp {
+		engine.lastGPUTimestamp = timestamp
+	}
 }
 
 // instanceGPUPayload returns the instance-level GPU telemetry payload built from
