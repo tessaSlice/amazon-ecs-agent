@@ -82,24 +82,31 @@ func main() {
 }
 
 // configureLogging points the shared logger at logFile so dcgm-init writes to
-// /var/log/ecs/dcgm-init.log, creating the directory on demand. A MkdirAll
-// failure is non-fatal: warn and skip file output (console logging is
-// unaffected).
+// /var/log/ecs/dcgm-init.log.
 func configureLogging() {
 	logger.InitSeelog()
 
+	// Target our own file first, overriding any ECS_LOGFILE the shared logger
+	// read from the environment at init so dcgm-init only ever writes here.
+	logger.SetConfigLogFile(logFile)
+	logger.SetRolloverType("date")
+
+	// File output is gated on the instance level, which defaults to "off" when
+	// ECS_LOG_DRIVER is set (inherited from /etc/ecs/ecs.config). Set it from
+	// ECS_LOGLEVEL, or info when unset, so the file is written regardless of the
+	// log driver. Set info first so an invalid ECS_LOGLEVEL (ignored by
+	// SetInstanceLogLevel) leaves info.
 	logger.SetInstanceLogLevel(logger.DEFAULT_LOGLEVEL)
 	if level := os.Getenv(logger.LOGLEVEL_ENV_VAR); level != "" {
 		logger.SetInstanceLogLevel(level)
 	}
 
-	logDir := filepath.Dir(logFile)
-	if err := os.MkdirAll(logDir, logDirPermission); err != nil {
-		seelog.Warnf("dcgm-init could not create log directory %s; not writing %s: %v", logDir, logFile, err)
-		return
+	// seelog opens the file lazily and creates the parent directory itself;
+	// create it up front too so a failure surfaces as a warning rather than
+	// silently on the first write.
+	if err := os.MkdirAll(filepath.Dir(logFile), logDirPermission); err != nil {
+		seelog.Warnf("dcgm-init could not pre-create log directory %s: %v", filepath.Dir(logFile), err)
 	}
-	logger.SetConfigLogFile(logFile)
-	logger.SetRolloverType("date")
 }
 
 type action struct {
