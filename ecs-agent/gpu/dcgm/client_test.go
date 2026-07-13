@@ -205,7 +205,9 @@ func TestClient_Shutdown_Initialized(t *testing.T) {
 			require.True(t, ok, "Client should be of type *dcgmClient")
 
 			// Manually set the client to connected state to test shutdown path.
-			ctx, cancel := context.WithCancel(context.Background())
+			// cancel is registered as a shutdown handler below; the context
+			// itself is not needed since the client no longer stores it.
+			_, cancel := context.WithCancel(context.Background())
 			cleanupCalled := false
 			mockCleanup := func() {
 				cleanupCalled = true
@@ -232,8 +234,6 @@ func TestClient_Shutdown_Initialized(t *testing.T) {
 			dcgmClient.xidWatchActive = true
 			dcgmClient.metricsFieldGroup = metricsFieldGroup
 			dcgmClient.xidFieldGroup = xidFieldGroup
-			dcgmClient.ctx = ctx
-			dcgmClient.cancelPolicyListener = cancel
 			dcgmClient.cleanupFunc = mockCleanup
 			dcgmClient.fieldGroupDestroyFunc = mockFieldGroupDestroy
 			dcgmClient.shutdownHandlers = []func(){cancel}
@@ -340,14 +340,9 @@ func TestClient_HealthyStateProducesCorrectStatus(t *testing.T) {
 	require.True(t, ok, "Client should be of type *dcgmClient")
 
 	// Manually set the client to connected state without violations.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	dcgmClient.mu.Lock()
 	dcgmClient.connected = true
 	dcgmClient.hasViolation = false
-	dcgmClient.ctx = ctx
-	dcgmClient.cancelPolicyListener = cancel
 	dcgmClient.mu.Unlock()
 
 	// IsHealthy should return true since there are no violations.
@@ -366,15 +361,10 @@ func TestClient_UnhealthyStateProducesCorrectStatus(t *testing.T) {
 	require.True(t, ok, "Client should be of type *dcgmClient")
 
 	// Manually set the client to connected state with violations.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	dcgmClient.mu.Lock()
 	dcgmClient.connected = true
 	dcgmClient.hasViolation = true
 	dcgmClient.lastShutdown = time.Now().Add(-2 * dcgmClient.initializationGracePeriod)
-	dcgmClient.ctx = ctx
-	dcgmClient.cancelPolicyListener = cancel
 	dcgmClient.mu.Unlock()
 
 	// IsHealthy should return false since there is at least one violation.
@@ -737,7 +727,11 @@ func (m mockPolicyViolation) toPolicyViolation() dcgm.PolicyViolation {
 	return v
 }
 
-// TestClient_IsConnectionLost_WithinGracePeriod tests that IsConnectionLost returns false within grace period.
+// TestClient_IsConnectionLost_WithinGracePeriod tests that IsConnectionLost
+// returns false within the grace period for a client that has connected before
+// (a transient reconnect). The grace window suppresses connection-lost only
+// after a first successful connect; the never-connected boot case is covered by
+// TestClient_IsConnectionLost_NeverConnectedWithinGracePeriod.
 func TestClient_IsConnectionLost_WithinGracePeriod(t *testing.T) {
 	t.Parallel()
 
@@ -751,7 +745,7 @@ func TestClient_IsConnectionLost_WithinGracePeriod(t *testing.T) {
 			name:        "returns false when not connected but within grace period",
 			gracePeriod: 5 * time.Second,
 			connected:   false,
-			description: "IsConnectionLost should return false within grace period even if not connected",
+			description: "IsConnectionLost should return false within grace period for a previously-connected client",
 		},
 		{
 			name:        "returns false when connected within grace period",
@@ -774,10 +768,13 @@ func TestClient_IsConnectionLost_WithinGracePeriod(t *testing.T) {
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok, "Client should be of type *dcgmClient")
 
-			// Set lastShutdown to now to be within grace period.
+			// Set lastShutdown to now to be within grace period, and mark that
+			// DCGM has connected before so the grace window applies (models a
+			// transient reconnect rather than an initial boot).
 			dcgmClient.mu.Lock()
 			dcgmClient.lastShutdown = time.Now()
 			dcgmClient.connected = tc.connected
+			dcgmClient.everConnected = true
 			dcgmClient.mu.Unlock()
 
 			// IsConnectionLost should return false within grace period.
@@ -786,6 +783,21 @@ func TestClient_IsConnectionLost_WithinGracePeriod(t *testing.T) {
 			assert.False(t, connectionLost, tc.description)
 		})
 	}
+}
+
+// TestClient_IsConnectionLost_NeverConnectedWithinGracePeriod tests that a client
+// that has NEVER connected reports connection-lost even within the grace period,
+// so a permanently-broken GPU host surfaces INSUFFICIENT_DATA on boot instead of
+// a false OK.
+func TestClient_IsConnectionLost_NeverConnectedWithinGracePeriod(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(Config{InitializationGracePeriod: 5 * time.Second})
+
+	// lastShutdown is set to now() at construction (within grace), connected is
+	// false, and everConnected is false — the initial-boot state.
+	assert.True(t, client.IsConnectionLost(),
+		"a never-connected client should report connection lost even within the grace period")
 }
 
 // TestClient_IsConnectionLost_OutsideGracePeriod tests that IsConnectionLost returns true outside grace period.
@@ -869,7 +881,11 @@ func TestClient_IsConnectionLost_ThreadSafety(t *testing.T) {
 	assert.True(t, true, "Multiple goroutines calling IsConnectionLost should not cause data races")
 }
 
-// TestClient_IsConnectionLost_InitialState tests IsConnectionLost behavior on newly created client.
+// TestClient_IsConnectionLost_InitialState tests IsConnectionLost behavior on a
+// newly created client. Because it has never connected, its GPU health is
+// genuinely unknown, so it reports connection lost (INSUFFICIENT_DATA upstream)
+// even though it is within the grace period — the grace window only suppresses
+// connection-lost after a first successful connect.
 func TestClient_IsConnectionLost_InitialState(t *testing.T) {
 	t.Parallel()
 
@@ -878,8 +894,7 @@ func TestClient_IsConnectionLost_InitialState(t *testing.T) {
 	// Check IsConnectionLost immediately after creation.
 	connectionLost := client.IsConnectionLost()
 
-	// Should return false because we're within grace period.
-	assert.False(t, connectionLost, "Newly created client should report connection not lost within grace period")
+	assert.True(t, connectionLost, "Newly created (never-connected) client should report connection lost")
 }
 
 // TestClient_IsConnectionLost_AfterReconcile tests IsConnectionLost behavior after Reconcile attempts.
@@ -978,7 +993,9 @@ func TestClient_IsConnectionLost_DistinguishesFromIsHealthy(t *testing.T) {
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok, "Client should be of type *dcgmClient")
 
-			// Set up client state.
+			// Set up client state. everConnected=true models an established
+			// client (connected at least once), so the grace window applies to
+			// its reconnects; the never-connected boot case is covered separately.
 			dcgmClient.mu.Lock()
 			if tc.outsideGracePeriod {
 				dcgmClient.lastShutdown = time.Now().Add(-1 * tc.gracePeriod).Add(-1 * time.Second)
@@ -986,6 +1003,7 @@ func TestClient_IsConnectionLost_DistinguishesFromIsHealthy(t *testing.T) {
 				dcgmClient.lastShutdown = time.Now()
 			}
 			dcgmClient.connected = tc.connected
+			dcgmClient.everConnected = true
 			dcgmClient.hasViolation = tc.hasViolation
 			dcgmClient.mu.Unlock()
 
@@ -1234,7 +1252,9 @@ func TestClient_ConnectionLossDetection(t *testing.T) {
 			dcgmClient, ok := client.(*dcgmClient)
 			require.True(t, ok, "Client should be of type *dcgmClient")
 
-			// Set up client state.
+			// Set up client state. everConnected=true models an established
+			// client so the grace window applies to its reconnects (the
+			// never-connected boot case is covered by a dedicated test).
 			dcgmClient.mu.Lock()
 			if tc.withinGracePeriod {
 				dcgmClient.lastShutdown = time.Now()
@@ -1242,6 +1262,7 @@ func TestClient_ConnectionLossDetection(t *testing.T) {
 				dcgmClient.lastShutdown = time.Now().Add(-1 * time.Second)
 			}
 			dcgmClient.connected = tc.connected
+			dcgmClient.everConnected = true
 			dcgmClient.mu.Unlock()
 
 			// Check connection lost status.
