@@ -140,6 +140,16 @@ func (e *Engine) run(ctx context.Context) error {
 	ticker := time.NewTicker(e.collectionInterval)
 	defer ticker.Stop()
 
+	// Collect once up front so the shared file has fresh metrics right after
+	// (re)start instead of the reader seeing a 0-byte file (first boot) or the
+	// previous run's stale snapshot for a full interval until the first tick.
+	// Skip only if a shutdown signal already fired during startup.
+	if ctx.Err() == nil {
+		if err := e.reconcileAndCollect(ctx); err != nil {
+			logger.Warn("dcgm-init initial metrics collection failed", logger.Fields{"error": err})
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
