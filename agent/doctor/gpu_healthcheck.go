@@ -24,6 +24,13 @@ import (
 	"github.com/cihub/seelog"
 )
 
+// gpuMetricsMaxStaleness bounds how old the shared GPU metrics file may be before
+// the health check treats it as unknown. dcgm-init rewrites the file every ~60s
+// (even on collection failure), so a file older than this means dcgm-init is dead
+// or hung — connection_lost cannot cover that, since a stopped dcgm-init can no
+// longer update the flag. Sized to tolerate a few missed writes without flapping.
+const gpuMetricsMaxStaleness = 5 * time.Minute
+
 type gpuHealthcheck struct {
 	HealthcheckType  string
 	Status           ecstcs.InstanceHealthCheckStatus
@@ -63,6 +70,24 @@ func (ghc *gpuHealthcheck) RunCheck() ecstcs.InstanceHealthCheckStatus {
 	// true while disconnected, so report INSUFFICIENT_DATA rather than a false OK.
 	if healthStatus.ConnectionLost {
 		seelog.Info("[GPUHealthcheck] DCGM connection lost, reporting insufficient data")
+		ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
+		return ecstcs.InstanceHealthCheckStatusInsufficientData
+	}
+
+	// A stale file means dcgm-init itself is dead or hung: it rewrites the file
+	// every ~60s (even on collection failure), so an old timestamp — or one we
+	// cannot parse — means we can no longer trust Healthy/ConnectionLost (a
+	// stopped dcgm-init cannot set ConnectionLost). Report INSUFFICIENT_DATA.
+	writtenAt, err := time.Parse(time.RFC3339, healthStatus.Timestamp)
+	if err != nil {
+		seelog.Warnf("[GPUHealthcheck] unparseable GPU metrics timestamp %q, reporting insufficient data: %v",
+			healthStatus.Timestamp, err)
+		ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
+		return ecstcs.InstanceHealthCheckStatusInsufficientData
+	}
+	if age := timeNow().Sub(writtenAt); age > gpuMetricsMaxStaleness {
+		seelog.Infof("[GPUHealthcheck] GPU metrics file is stale (age %s > %s), reporting insufficient data",
+			age, gpuMetricsMaxStaleness)
 		ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
 		return ecstcs.InstanceHealthCheckStatusInsufficientData
 	}
