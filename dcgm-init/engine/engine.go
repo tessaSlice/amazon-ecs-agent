@@ -44,13 +44,16 @@ const (
 	gpuSupportEnvVar = "ECS_ENABLE_GPU_SUPPORT"
 )
 
+// TerminalError marks an unrecoverable failure. main() maps it to
+// TerminalFailureAgentExitCode (matching the systemd unit's
+// RestartPreventExitStatus) — the exit code lives at that single call site
+// rather than on the error, so the two cannot drift.
 type TerminalError struct {
-	err      string
-	exitCode int
+	err string
 }
 
 func (e *TerminalError) Error() string {
-	return fmt.Sprintf("%s: %d", e.err, e.exitCode)
+	return e.err
 }
 
 const (
@@ -101,8 +104,7 @@ func (e *Engine) Start() error {
 	// manager. When off, return a terminal error so systemd does not restart-loop.
 	if os.Getenv(gpuSupportEnvVar) != "true" {
 		return &TerminalError{
-			err:      "dcgm-init: ECS_ENABLE_GPU_SUPPORT is not enabled",
-			exitCode: TerminalFailureAgentExitCode,
+			err: "dcgm-init: ECS_ENABLE_GPU_SUPPORT is not enabled",
 		}
 	}
 
@@ -139,6 +141,16 @@ func (e *Engine) Start() error {
 func (e *Engine) run(ctx context.Context) error {
 	ticker := time.NewTicker(e.collectionInterval)
 	defer ticker.Stop()
+
+	// Collect once up front so the shared file has fresh metrics right after
+	// (re)start instead of the reader seeing a 0-byte file (first boot) or the
+	// previous run's stale snapshot for a full interval until the first tick.
+	// Skip only if a shutdown signal already fired during startup.
+	if ctx.Err() == nil {
+		if err := e.reconcileAndCollect(ctx); err != nil {
+			logger.Warn("dcgm-init initial metrics collection failed", logger.Fields{"error": err})
+		}
+	}
 
 	for {
 		select {

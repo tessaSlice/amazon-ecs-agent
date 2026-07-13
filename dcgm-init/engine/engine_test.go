@@ -385,7 +385,7 @@ func TestStartGPUSupportGate(t *testing.T) {
 			require.Error(t, err, "Start() should fail when GPU support is not enabled")
 			termErr, ok := err.(*TerminalError)
 			require.True(t, ok, "Start() should return a *TerminalError when GPU support is not enabled")
-			assert.Equal(t, TerminalFailureAgentExitCode, termErr.exitCode)
+			assert.Contains(t, termErr.Error(), "ECS_ENABLE_GPU_SUPPORT is not enabled")
 
 			// The gate returns before creating the metrics dir/files.
 			_, statErr := os.Stat(outputPath)
