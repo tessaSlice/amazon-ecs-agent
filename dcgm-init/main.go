@@ -30,11 +30,7 @@ import (
 
 // log config
 const (
-	// logFile is where dcgm-init writes its logs, alongside ecs-init's
-	// ecs-init.log.
-	logFile = "/var/log/ecs/dcgm-init.log"
-	// logDirPermission is the log directory mode: world-readable/traversable so
-	// the file can be inspected, writable only by root (dcgm-init runs as root).
+	logFile                      = "/var/log/ecs/dcgm-init.log"
 	logDirPermission os.FileMode = 0755
 )
 
