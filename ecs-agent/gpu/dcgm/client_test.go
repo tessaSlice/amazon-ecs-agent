@@ -205,7 +205,9 @@ func TestClient_Shutdown_Initialized(t *testing.T) {
 			require.True(t, ok, "Client should be of type *dcgmClient")
 
 			// Manually set the client to connected state to test shutdown path.
-			ctx, cancel := context.WithCancel(context.Background())
+			// cancel is registered as a shutdown handler below; the context
+			// itself is not needed since the client no longer stores it.
+			_, cancel := context.WithCancel(context.Background())
 			cleanupCalled := false
 			mockCleanup := func() {
 				cleanupCalled = true
@@ -232,8 +234,6 @@ func TestClient_Shutdown_Initialized(t *testing.T) {
 			dcgmClient.xidWatchActive = true
 			dcgmClient.metricsFieldGroup = metricsFieldGroup
 			dcgmClient.xidFieldGroup = xidFieldGroup
-			dcgmClient.ctx = ctx
-			dcgmClient.cancelPolicyListener = cancel
 			dcgmClient.cleanupFunc = mockCleanup
 			dcgmClient.fieldGroupDestroyFunc = mockFieldGroupDestroy
 			dcgmClient.shutdownHandlers = []func(){cancel}
@@ -340,14 +340,9 @@ func TestClient_HealthyStateProducesCorrectStatus(t *testing.T) {
 	require.True(t, ok, "Client should be of type *dcgmClient")
 
 	// Manually set the client to connected state without violations.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	dcgmClient.mu.Lock()
 	dcgmClient.connected = true
 	dcgmClient.hasViolation = false
-	dcgmClient.ctx = ctx
-	dcgmClient.cancelPolicyListener = cancel
 	dcgmClient.mu.Unlock()
 
 	// IsHealthy should return true since there are no violations.
@@ -366,15 +361,10 @@ func TestClient_UnhealthyStateProducesCorrectStatus(t *testing.T) {
 	require.True(t, ok, "Client should be of type *dcgmClient")
 
 	// Manually set the client to connected state with violations.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	dcgmClient.mu.Lock()
 	dcgmClient.connected = true
 	dcgmClient.hasViolation = true
 	dcgmClient.lastShutdown = time.Now().Add(-2 * dcgmClient.initializationGracePeriod)
-	dcgmClient.ctx = ctx
-	dcgmClient.cancelPolicyListener = cancel
 	dcgmClient.mu.Unlock()
 
 	// IsHealthy should return false since there is at least one violation.

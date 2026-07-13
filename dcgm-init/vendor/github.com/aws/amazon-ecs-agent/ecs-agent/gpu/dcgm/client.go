@@ -264,15 +264,6 @@ type dcgmClient struct {
 	// Timestamp of last shutdown for grace period calculation.
 	lastShutdown time.Time
 
-	// Context for lifecycle management.
-	ctx context.Context
-
-	// Cancel function for policy violation listener.
-	cancelPolicyListener context.CancelFunc
-
-	// Channel for receiving policy violations.
-	policyViolationChan <-chan dcgm.PolicyViolation
-
 	// Cleanup function returned by dcgm.Init.
 	cleanupFunc func()
 
@@ -368,7 +359,12 @@ func (c *dcgmClient) Reconcile(ctx context.Context) (bool, error) {
 		logger.Warn("DCGM health check failed, will attempt reconnection", logger.Fields{
 			"error": introspectErr,
 		})
-		c.connected = false // Mark connection as lost.
+		// Do NOT clear c.connected here: shutdownLocked() short-circuits when
+		// !c.connected, so pre-clearing it would skip the whole teardown
+		// (cancelling the policy-listener goroutine, calling cleanupFunc to
+		// release the native connection, destroying field groups, updating
+		// lastShutdown) and leak those resources on every reconnect.
+		// shutdownLocked() resets c.connected = false itself once cleanup runs.
 	} else {
 		logger.Info("DCGM not connected, will attempt to connect")
 	}
@@ -471,16 +467,28 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 			"socketPath": c.socketPath,
 			"timeout":    initTimeout,
 		})
+		// dcgm.Init() cannot be cancelled and may still succeed after the timeout.
+		// Reap the late result and release the native connection so its cleanup
+		// func is never orphaned in the buffered channel (descriptor/handle leak).
+		go func() {
+			if late := <-resultChan; late.err == nil && late.cleanup != nil {
+				logger.Info("releasing DCGM connection that established after timeout", logger.Fields{
+					"socketPath": c.socketPath,
+				})
+				late.cleanup()
+			}
+		}()
 		return fmt.Errorf("timeout connecting to nv-hostengine after %v", initTimeout)
 	}
 
 	c.cleanupFunc = result.cleanup
 	logger.Info("successfully connected to host engine")
 
-	// Create context for policy violation listener.
+	// Create context for policy violation listener. It is cancelled via the
+	// shutdownHandlers entry below (invoked by shutdownLocked); the listener
+	// goroutine receives policyCtx/policyChan as arguments rather than reading
+	// them off the client struct, so no shared fields are needed.
 	policyCtx, cancelPolicy := context.WithCancel(ctx)
-	c.ctx = policyCtx
-	c.cancelPolicyListener = cancelPolicy
 	c.shutdownHandlers = append(c.shutdownHandlers, cancelPolicy)
 
 	// Register policy violation listeners for all required policies.
@@ -503,8 +511,6 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	}
 	logger.Info("successfully registered policy violation listeners")
 
-	c.policyViolationChan = policyChan
-
 	// Enable all DCGM health check systems. We consider the instance to be unhealthy even if a GPU
 	// that is not in use is impaired. This prevents a situation where a task is launched and given
 	// an impaired GPU.
@@ -520,8 +526,13 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	}
 	logger.Info("successfully enabled health check systems")
 
-	// Start goroutine to listen for policy violations.
-	go c.listenForPolicyViolations()
+	// Start goroutine to listen for policy violations. The context and channel
+	// are passed as arguments (not stored on the client) so that a later
+	// reconnect, which creates a fresh policyCtx/policyChan, cannot race this
+	// goroutine's reads. The goroutine is bound to this initialization's
+	// ctx/chan and exits when policyCtx is cancelled via the shutdownHandlers'
+	// cancelPolicy.
+	go c.listenForPolicyViolations(policyCtx, policyChan)
 
 	// Mark as connected. Note: We do NOT reset hasViolation here because
 	// policy violations should persist across DCGM reconnections. Once a GPU
@@ -546,16 +557,19 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	return nil
 }
 
-// listenForPolicyViolations monitors the policy violation channel and sets hasViolation flag.
-func (c *dcgmClient) listenForPolicyViolations() {
+// listenForPolicyViolations monitors the policy violation channel and sets
+// hasViolation flag. ctx and violationChan are passed in (not stored on the
+// client) so a concurrent reconnect that creates a fresh context/channel cannot
+// race with this goroutine.
+func (c *dcgmClient) listenForPolicyViolations(ctx context.Context, violationChan <-chan dcgm.PolicyViolation) {
 	logger.Info("policy violation listener started")
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-ctx.Done():
 			// Context cancelled, exit goroutine.
 			logger.Info("policy violation listener stopped")
 			return
-		case violation, ok := <-c.policyViolationChan:
+		case violation, ok := <-violationChan:
 			if !ok {
 				// Channel closed, exit goroutine.
 				logger.Info("policy violation channel closed")
