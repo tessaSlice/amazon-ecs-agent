@@ -29,6 +29,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// gpuMetricsEmitted drains one telemetry message (an idle engine always sends
+// one per publishMetrics tick) and reports whether it carried instance-level GPU
+// metrics. Emission is the observable outcome of a fresh per-tick snapshot, so
+// tests assert on it rather than on the engine's internal fields.
+func gpuMetricsEmitted(t *testing.T, ch <-chan ecstcs.TelemetryMessage) bool {
+	t.Helper()
+	select {
+	case msg := <-ch:
+		return msg.InstanceMetrics != nil && len(msg.InstanceMetrics.GeneralMetricsPayload) > 0
+	default:
+		t.Fatal("expected a telemetry message to be published")
+		return false
+	}
+}
+
 func TestGPUMetricsNotEmittedWhenTimestampStale(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
@@ -40,23 +55,26 @@ func TestGPUMetricsNotEmittedWhenTimestampStale(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	var cancel context.CancelFunc
+	engine.ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// Simulate 3 ticks to trigger GPU emission (gpuMetricsPublishCount >= 3)
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
 
-	// First emission should have instance metrics (new timestamp)
-	assert.NotNil(t, engine.currentGPUMetrics, "First tick with new timestamp should populate currentGPUMetrics")
+	// First emission should carry instance GPU metrics (new timestamp) and
+	// advance the de-dup cursor once the message is sent.
+	assert.True(t, gpuMetricsEmitted(t, telemetryMessages), "First tick with new timestamp should emit GPU metrics")
 	assert.Equal(t, "2026-01-01T00:00:00Z", engine.lastGPUTimestamp)
 
 	// Simulate 3 more ticks with the SAME file (timestamp unchanged)
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
 
-	// Second emission should NOT have GPU metrics (stale timestamp)
-	assert.Nil(t, engine.currentGPUMetrics, "Second tick with same timestamp should not populate currentGPUMetrics")
+	// Second emission should NOT carry GPU metrics (stale timestamp)
+	assert.False(t, gpuMetricsEmitted(t, telemetryMessages), "Second tick with same timestamp should not emit GPU metrics")
 	assert.Equal(t, "2026-01-01T00:00:00Z", engine.lastGPUTimestamp, "Timestamp should not change")
 }
 
@@ -71,19 +89,21 @@ func TestGPUMetricsEmittedWhenTimestampChanges(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	var cancel context.CancelFunc
+	engine.ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// First emission
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
-	assert.NotNil(t, engine.currentGPUMetrics)
+	assert.True(t, gpuMetricsEmitted(t, telemetryMessages))
 	assert.Equal(t, "2026-01-01T00:00:00Z", engine.lastGPUTimestamp)
 
 	// Same timestamp — no emission
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
-	assert.Nil(t, engine.currentGPUMetrics)
+	assert.False(t, gpuMetricsEmitted(t, telemetryMessages))
 
 	// Update file with new timestamp (simulates dcgm-init writing next tick)
 	writeGPUMetricsFile(t, filePath, "2026-01-01T00:01:00Z", 99.0)
@@ -91,10 +111,8 @@ func TestGPUMetricsEmittedWhenTimestampChanges(t *testing.T) {
 	// New timestamp — should emit again
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
-	assert.NotNil(t, engine.currentGPUMetrics, "New timestamp should trigger emission")
+	assert.True(t, gpuMetricsEmitted(t, telemetryMessages), "New timestamp should trigger emission")
 	assert.Equal(t, "2026-01-01T00:01:00Z", engine.lastGPUTimestamp)
-	require.Len(t, engine.currentGPUMetrics, 1)
-	assert.Equal(t, 99.0, *engine.currentGPUMetrics[0].GPUUtilization)
 }
 
 func TestGPUMetricsNotEmittedBeforeThirdTick(t *testing.T) {
@@ -107,21 +125,23 @@ func TestGPUMetricsNotEmittedBeforeThirdTick(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	var cancel context.CancelFunc
+	engine.ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// First tick (count goes to 1) — should not emit
 	engine.gpuMetricsPublishCount = 0
 	engine.publishMetrics(false)
-	assert.Nil(t, engine.currentGPUMetrics, "Should not emit on first tick")
+	assert.False(t, gpuMetricsEmitted(t, telemetryMessages), "Should not emit on first tick")
 
 	// Second tick (count goes to 2) — should not emit
 	engine.publishMetrics(false)
-	assert.Nil(t, engine.currentGPUMetrics, "Should not emit on second tick")
+	assert.False(t, gpuMetricsEmitted(t, telemetryMessages), "Should not emit on second tick")
 
 	// Third tick (count goes to 3, resets to 0) — should emit
 	engine.publishMetrics(false)
-	assert.NotNil(t, engine.currentGPUMetrics, "Should emit on third tick")
+	assert.True(t, gpuMetricsEmitted(t, telemetryMessages), "Should emit on third tick")
 }
 
 func TestGPUMetricsNotEmittedWhenTimestampGoesBackward(t *testing.T) {
@@ -135,13 +155,15 @@ func TestGPUMetricsNotEmittedWhenTimestampGoesBackward(t *testing.T) {
 	healthMessages := make(chan ecstcs.HealthMessage, 10)
 
 	engine := NewDockerStatsEngine(&cfg, nil, nil, telemetryMessages, healthMessages, nil)
-	engine.ctx, _ = context.WithCancel(context.Background())
+	var cancel context.CancelFunc
+	engine.ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
 	engine.dcgmHandler = gpu.NewDCGMHandler(filePath)
 
 	// First emission succeeds (new timestamp)
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
-	assert.NotNil(t, engine.currentGPUMetrics)
+	assert.True(t, gpuMetricsEmitted(t, telemetryMessages))
 	assert.Equal(t, "2026-01-01T00:05:00Z", engine.lastGPUTimestamp)
 
 	// Write metrics with an OLDER timestamp (clock skew, file corruption, etc.)
@@ -150,7 +172,7 @@ func TestGPUMetricsNotEmittedWhenTimestampGoesBackward(t *testing.T) {
 	// Should NOT emit because timestamp is older than lastGPUTimestamp
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
-	assert.Nil(t, engine.currentGPUMetrics,
+	assert.False(t, gpuMetricsEmitted(t, telemetryMessages),
 		"Should not emit metrics when file timestamp is older than last emitted timestamp")
 	assert.Equal(t, "2026-01-01T00:05:00Z", engine.lastGPUTimestamp,
 		"lastGPUTimestamp should remain at the newer value")
@@ -161,7 +183,7 @@ func TestGPUMetricsNotEmittedWhenTimestampGoesBackward(t *testing.T) {
 	// Should NOT emit because timestamp is equal (not strictly greater)
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
-	assert.Nil(t, engine.currentGPUMetrics,
+	assert.False(t, gpuMetricsEmitted(t, telemetryMessages),
 		"Should not emit metrics when file timestamp equals last emitted timestamp")
 
 	// Write metrics with a newer timestamp — should emit
@@ -169,10 +191,9 @@ func TestGPUMetricsNotEmittedWhenTimestampGoesBackward(t *testing.T) {
 
 	engine.gpuMetricsPublishCount = 2
 	engine.publishMetrics(false)
-	assert.NotNil(t, engine.currentGPUMetrics,
+	assert.True(t, gpuMetricsEmitted(t, telemetryMessages),
 		"Should emit metrics when file timestamp is strictly newer")
 	assert.Equal(t, "2026-01-01T00:06:00Z", engine.lastGPUTimestamp)
-	assert.Equal(t, 100.0, *engine.currentGPUMetrics[0].GPUUtilization)
 }
 
 func writeGPUMetricsFile(t *testing.T, path string, timestamp string, utilization float64) {
