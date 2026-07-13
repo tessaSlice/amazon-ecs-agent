@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
 	"github.com/aws/amazon-ecs-agent/dcgm-init/version"
@@ -27,8 +28,15 @@ import (
 	"github.com/cihub/seelog"
 )
 
-// logFile is where dcgm-init writes its logs, alongside ecs-init's ecs-init.log.
-const logFile = "/var/log/ecs/dcgm-init.log"
+// log config
+const (
+	// logFile is where dcgm-init writes its logs, alongside ecs-init's
+	// ecs-init.log.
+	logFile = "/var/log/ecs/dcgm-init.log"
+	// logDirPermission is the log directory mode: world-readable/traversable so
+	// the file can be inspected, writable only by root (dcgm-init runs as root).
+	logDirPermission os.FileMode = 0755
+)
 
 // all supported commands
 const (
@@ -77,28 +85,29 @@ func main() {
 	}
 }
 
-// configureLogging points the shared logger at logFile so dcgm-init writes to
-// /var/log/ecs/dcgm-init.log.
+// configureLogging sets up dcgm-init's file logging to logFile.
 func configureLogging() {
 	logger.InitSeelog()
 
-	// Target our own file first, overriding any ECS_LOGFILE the shared logger
-	// read from the environment at init so dcgm-init only ever writes here.
+	// Set our file first so it overrides any ECS_LOGFILE from the environment.
 	logger.SetConfigLogFile(logFile)
 	logger.SetRolloverType("date")
 
-	// File output is gated on the instance level, which defaults to "off" when
-	// ECS_LOG_DRIVER is set (inherited from /etc/ecs/ecs.config). Set it from
-	// ECS_LOGLEVEL, or info when unset, so the file is written regardless of the
-	// log driver. Set info first so an invalid ECS_LOGLEVEL (ignored by
-	// SetInstanceLogLevel) leaves info.
+	// File output defaults to "off" when ECS_LOG_DRIVER is set, so set the level
+	// from ECS_LOGLEVEL (info when unset) so the file is always written. Set info
+	// first so an invalid ECS_LOGLEVEL (a no-op for SetInstanceLogLevel) keeps it.
 	logger.SetInstanceLogLevel(logger.DEFAULT_LOGLEVEL)
 	if level := os.Getenv(logger.LOGLEVEL_ENV_VAR); level != "" {
 		logger.SetInstanceLogLevel(level)
 	}
-	// seelog opens the file and creates its parent directory (/var/log/ecs)
-	// lazily on the first write, so configureLogging itself has no filesystem
-	// side effects and is safe to run for every command.
+
+	// Create the log directory up front (with our mode) and warn clearly if it
+	// fails; seelog also creates it lazily on first write. Best-effort: console
+	// logging continues regardless, and file logging works once the dir exists.
+	logDir := filepath.Dir(logFile)
+	if err := os.MkdirAll(logDir, logDirPermission); err != nil {
+		seelog.Warnf("dcgm-init could not create log directory %s: %v", logDir, err)
+	}
 }
 
 type action struct {
