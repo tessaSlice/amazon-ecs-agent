@@ -32,18 +32,19 @@ func TestLogfmtFormat(t *testing.T) {
 
 func TestSeelogConfig(t *testing.T) {
 	config = &logConfig{
-		logfile:      "foo.log",
-		level:        logLevel,
-		outputFormat: outputFmt,
-		maxRollCount: 24,
+		logfile:       "foo.log",
+		level:         logLevel,
+		outputFormat:  outputFmt,
+		maxRollCount:  24,
+		maxFileSizeMB: 5,
 	}
 	c := seelogConfig()
 	assert.Equal(t, `
 <seelog type="asyncloop" minlevel="info">
 	<outputs formatid="logfmt">
 		<console />
-		<rollingfile filename="foo.log" type="date"
-		 datepattern="2006-01-02-15" archivetype="none" maxrolls="24" />
+		<rollingfile filename="foo.log" type="size"
+		 maxsize="5000000" archivetype="none" maxrolls="24" />
 	</outputs>
 	<formats>
 		<format id="logfmt" format="%VolumePluginLogfmt" />

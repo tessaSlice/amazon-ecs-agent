@@ -30,6 +30,9 @@ const (
 	defaultLogLevel  = "info"
 	outputFmt        = "logfmt"
 	rollCount        = 24
+	// maxFileSizeMB caps each log file before rollover; worst-case disk use is
+	// maxFileSizeMB*(maxRollCount+1) (archives + active file), matching ecs-agent.
+	maxFileSizeMB = 5
 )
 
 // logLevels is the mapping from ECS_LOGLEVEL to Seelog provided levels.
@@ -43,10 +46,11 @@ var logLevels = map[string]string{
 }
 
 type logConfig struct {
-	level        string
-	outputFormat string
-	maxRollCount int
-	lock         sync.Mutex
+	level         string
+	outputFormat  string
+	maxRollCount  int
+	maxFileSizeMB int
+	lock          sync.Mutex
 }
 
 // config contains config for seelog logger
@@ -54,9 +58,10 @@ var config *logConfig
 
 func init() {
 	config = &logConfig{
-		level:        defaultLogLevel,
-		outputFormat: outputFmt,
-		maxRollCount: rollCount,
+		level:         defaultLogLevel,
+		outputFormat:  outputFmt,
+		maxRollCount:  rollCount,
+		maxFileSizeMB: maxFileSizeMB,
 	}
 }
 
@@ -109,8 +114,8 @@ func seelogConfig() string {
 		<console />`
 	if conf.InitLogFile() != "" {
 		c += `
-		<rollingfile filename="` + conf.InitLogFile() + `" type="date"
-		 datepattern="2006-01-02-15" archivetype="none" maxrolls="` + strconv.Itoa(config.maxRollCount) + `" />`
+		<rollingfile filename="` + conf.InitLogFile() + `" type="size"
+		 maxsize="` + strconv.Itoa(config.maxFileSizeMB*1000000) + `" archivetype="none" maxrolls="` + strconv.Itoa(config.maxRollCount) + `" />`
 	}
 	c += `
 	</outputs>

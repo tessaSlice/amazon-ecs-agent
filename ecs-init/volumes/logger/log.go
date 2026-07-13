@@ -26,13 +26,17 @@ const (
 	logLevel      = "info"
 	outputFmt     = "logfmt"
 	rollCount     = 24
+	// maxFileSizeMB caps each log file before rollover; worst-case disk use is
+	// maxFileSizeMB*(maxRollCount+1) (archives + active file), matching ecs-agent.
+	maxFileSizeMB = 5
 )
 
 type logConfig struct {
-	logfile      string
-	level        string
-	outputFormat string
-	maxRollCount int
+	logfile       string
+	level         string
+	outputFormat  string
+	maxRollCount  int
+	maxFileSizeMB int
 }
 
 // config contains config for seelog logger
@@ -41,10 +45,11 @@ var config *logConfig
 // Setup sets the cusotm logging config
 func Setup() {
 	config = &logConfig{
-		logfile:      logFileFormat,
-		level:        logLevel,
-		outputFormat: outputFmt,
-		maxRollCount: rollCount,
+		logfile:       logFileFormat,
+		level:         logLevel,
+		outputFormat:  outputFmt,
+		maxRollCount:  rollCount,
+		maxFileSizeMB: maxFileSizeMB,
 	}
 
 	if err := seelog.RegisterCustomFormatter("VolumePluginLogfmt", logfmtFormatter); err != nil {
@@ -76,8 +81,8 @@ func seelogConfig() string {
 		<console />`
 	if config.logfile != "" {
 		c += `
-		<rollingfile filename="` + config.logfile + `" type="date"
-		 datepattern="2006-01-02-15" archivetype="none" maxrolls="` + strconv.Itoa(config.maxRollCount) + `" />`
+		<rollingfile filename="` + config.logfile + `" type="size"
+		 maxsize="` + strconv.Itoa(config.maxFileSizeMB*1000000) + `" archivetype="none" maxrolls="` + strconv.Itoa(config.maxRollCount) + `" />`
 	}
 	c += `
 	</outputs>
