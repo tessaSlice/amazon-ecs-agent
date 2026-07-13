@@ -19,7 +19,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
 	"github.com/aws/amazon-ecs-agent/dcgm-init/version"
@@ -28,11 +27,8 @@ import (
 	"github.com/cihub/seelog"
 )
 
-// log config
-const (
-	logFile                      = "/var/log/ecs/dcgm-init.log"
-	logDirPermission os.FileMode = 0755
-)
+// logFile is where dcgm-init writes its logs, alongside ecs-init's ecs-init.log.
+const logFile = "/var/log/ecs/dcgm-init.log"
 
 // all supported commands
 const (
@@ -49,15 +45,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	configureLogging()
+	defer seelog.Flush()
+
 	if args[0] == VERSION {
 		if err := version.PrintVersion(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to print version info: %v\n", err)
+			seelog.Errorf("failed to print version info: %v", err)
 		}
 		return
 	}
-
-	configureLogging()
-	defer seelog.Flush()
 
 	init, err := engine.New()
 	if err != nil {
@@ -100,13 +96,9 @@ func configureLogging() {
 	if level := os.Getenv(logger.LOGLEVEL_ENV_VAR); level != "" {
 		logger.SetInstanceLogLevel(level)
 	}
-
-	// seelog opens the file lazily and creates the parent directory itself;
-	// create it up front too so a failure surfaces as a warning rather than
-	// silently on the first write.
-	if err := os.MkdirAll(filepath.Dir(logFile), logDirPermission); err != nil {
-		seelog.Warnf("dcgm-init could not pre-create log directory %s: %v", filepath.Dir(logFile), err)
-	}
+	// seelog opens the file and creates its parent directory (/var/log/ecs)
+	// lazily on the first write, so configureLogging itself has no filesystem
+	// side effects and is safe to run for every command.
 }
 
 type action struct {
