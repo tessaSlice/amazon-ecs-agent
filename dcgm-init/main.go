@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/aws/amazon-ecs-agent/dcgm-init/engine"
 	"github.com/aws/amazon-ecs-agent/dcgm-init/version"
@@ -26,6 +27,14 @@ import (
 
 	"github.com/cihub/seelog"
 )
+
+// logFile is the location on disk where dcgm-init writes its logs, in the same
+// /var/log/ecs directory as ecs-init's ecs-init.log.
+const logFile = "/var/log/ecs/dcgm-init.log"
+
+// logDirPermission is the log directory mode: world-readable/traversable so
+// the file can be inspected, writable only by root (dcgm-init runs as root).
+const logDirPermission os.FileMode = 0755
 
 // all supported commands
 const (
@@ -42,15 +51,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.InitSeelog()
-	defer seelog.Flush()
+	// version just prints to stdout; configure logging only for the
+	// long-running commands below to keep it free of log-dir side effects.
+	// Report errors via stderr since seelog isn't configured on this path.
 	if args[0] == VERSION {
-		err := version.PrintVersion()
-		if err != nil {
-			seelog.Errorf("failed print version info, err: %v", err)
+		if err := version.PrintVersion(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to print version info: %v\n", err)
 		}
 		return
 	}
+
+	configureLogging()
+	defer seelog.Flush()
 
 	init, err := engine.New()
 	if err != nil {
@@ -61,6 +73,8 @@ func main() {
 	action, ok := actions[args[0]]
 	if !ok {
 		usage(actions)
+		// os.Exit skips the deferred Flush; flush the async logger explicitly.
+		seelog.Flush()
 		os.Exit(1)
 	}
 	err = action.function()
@@ -71,6 +85,33 @@ func main() {
 		}
 		die(err, engine.DefaultInitErrorExitCode)
 	}
+}
+
+// configureLogging points the shared logger at logFile so dcgm-init writes to
+// /var/log/ecs/dcgm-init.log, creating the directory on demand. A MkdirAll
+// failure is non-fatal: warn and skip file output (console logging is
+// unaffected).
+func configureLogging() {
+	logger.InitSeelog()
+
+	// The shared logger gates file output on the instance level, which defaults
+	// to "off" when ECS_LOG_DRIVER is set (inherited from /etc/ecs/ecs.config),
+	// suppressing the file. Set it from ECS_LOGLEVEL, or info when unset, so
+	// dcgm-init.log is written regardless of the log driver. Set info first so
+	// an invalid ECS_LOGLEVEL (ignored by SetInstanceLogLevel) leaves info.
+	logger.SetInstanceLogLevel(logger.DEFAULT_LOGLEVEL)
+	if level := os.Getenv(logger.LOGLEVEL_ENV_VAR); level != "" {
+		logger.SetInstanceLogLevel(level)
+	}
+
+	logDir := filepath.Dir(logFile)
+	if err := os.MkdirAll(logDir, logDirPermission); err != nil {
+		seelog.Warnf("dcgm-init could not create log directory %s; not writing %s: %v", logDir, logFile, err)
+		return
+	}
+	logger.SetConfigLogFile(logFile)
+	// Roll the log by date (the shared logger defaults to size-based rollover).
+	logger.SetRolloverType("date")
 }
 
 type action struct {
