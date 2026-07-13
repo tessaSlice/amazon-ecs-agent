@@ -89,21 +89,19 @@ func main() {
 func configureLogging() {
 	logger.InitSeelog()
 
-	// Set our file first so it overrides any ECS_LOGFILE from the environment.
+	// Set our file first to override any ECS_LOGFILE from the environment.
 	logger.SetConfigLogFile(logFile)
 	logger.SetRolloverType("date")
 
-	// File output defaults to "off" when ECS_LOG_DRIVER is set, so set the level
-	// from ECS_LOGLEVEL (info when unset) so the file is always written. Set info
-	// first so an invalid ECS_LOGLEVEL (a no-op for SetInstanceLogLevel) keeps it.
+	// The file level defaults to "off" under ECS_LOG_DRIVER, so force it from
+	// ECS_LOGLEVEL (info when unset/invalid) so the file is always written.
 	logger.SetInstanceLogLevel(logger.DEFAULT_LOGLEVEL)
 	if level := os.Getenv(logger.LOGLEVEL_ENV_VAR); level != "" {
 		logger.SetInstanceLogLevel(level)
 	}
 
-	// Create the log directory up front (with our mode) and warn clearly if it
-	// fails; seelog also creates it lazily on first write. Best-effort: console
-	// logging continues regardless, and file logging works once the dir exists.
+	// Best-effort: seelog also creates the dir lazily; this just warns clearly
+	// on failure and applies our mode.
 	logDir := filepath.Dir(logFile)
 	if err := os.MkdirAll(logDir, logDirPermission); err != nil {
 		seelog.Warnf("dcgm-init could not create log directory %s: %v", logDir, err)
