@@ -497,7 +497,17 @@ func (c *client) getHostConfig(envVarsFromFiles map[string]string) *godocker.Hos
 				if err := mkdirAll(gpuMetricsDir, gpuMetricsDirPerm); err != nil {
 					log.Warnf("Failed to create GPU metrics directory %s, skipping bind mount: %v", gpuMetricsDir, err)
 				} else {
-					binds = append(binds, gpuMetricsDir+":"+gpuMetricsDir+readOnly)
+					// Mount read-write, NOT read-only. /var/run/ecs also holds
+					// subdirs the Agent itself creates and writes (EBS CSI driver
+					// sockets, Service Connect status). This bind nests on top of
+					// the read-write /var/run bind (the Docker socket mount), and
+					// the more-specific mount wins — so a read-only bind here would
+					// flip that subtree read-only inside the container and make the
+					// Agent's mkdir/chown of those daemon dirs fail with EROFS,
+					// breaking EBS Task Attach and Service Connect on GPU hosts.
+					// The Agent only reads dcgm-init's metrics file, so read-write
+					// grants it nothing it does not already have via /var/run.
+					binds = append(binds, gpuMetricsDir+":"+gpuMetricsDir)
 				}
 			}
 		}

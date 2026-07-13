@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/aws/amazon-ecs-agent/ecs-init/config"
@@ -541,13 +540,16 @@ func TestGPUMetricsBindMount_PresentWhenGPUEnabled(t *testing.T) {
 	mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
 		var foundGPUMetricsBind bool
 		for _, bind := range opts.HostConfig.Binds {
-			if strings.Contains(bind, "/var/run/ecs") && strings.Contains(bind, ":ro") {
+			// Must be read-write (no :ro suffix): the Agent creates managed-daemon
+			// subdirs under /var/run/ecs, and a read-only bind would shadow the
+			// writable /var/run bind and break them with EROFS.
+			if bind == gpuMetricsDir+":"+gpuMetricsDir {
 				foundGPUMetricsBind = true
 				break
 			}
 		}
 		assert.True(t, foundGPUMetricsBind,
-			"GPU metrics directory /var/run/ecs should be bind-mounted read-only when GPU enabled")
+			"GPU metrics directory /var/run/ecs should be bind-mounted read-write when GPU enabled")
 	}).Return(&godocker.Container{
 		ID: containerID,
 	}, nil)
@@ -562,7 +564,6 @@ func TestGPUMetricsBindMount_PresentWhenGPUEnabled(t *testing.T) {
 	_, err := client.StartAgent()
 	assert.NoError(t, err)
 }
-
 
 func TestNvidiaGPUDevicesPresentWithRetries(t *testing.T) {
 	testCases := []struct {
