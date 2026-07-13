@@ -6,8 +6,7 @@ ConditionPathExists=/usr/bin/nv-hostengine
 
 [Service]
 Type=simple
-Restart=on-failure
-RestartPreventExitStatus=5
+Restart=always
 RestartSec=10s
 EnvironmentFile=-/etc/ecs/ecs.config
 ExecStart=/usr/libexec/dcgm-init start
