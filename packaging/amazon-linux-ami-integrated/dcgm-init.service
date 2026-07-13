@@ -11,8 +11,16 @@ Restart=on-failure
 # not "true" — a terminal state restarting cannot fix — so systemd must not restart-loop it.
 RestartPreventExitStatus=5
 RestartSec=10s
-# Load ECS_ENABLE_GPU_SUPPORT (the start gate) and ECS_LOGLEVEL from ecs.config;
-# leading '-' makes the file optional so dcgm-init still starts if it is absent.
+# Load ECS_ENABLE_GPU_SUPPORT (the start gate) and ECS_LOGLEVEL from ecs.config.
+# ecs-init/the Agent read the GPU gate from BOTH the instance config
+# (/var/lib/ecs/ecs.config, e.g. written by the ECS-optimized AMI / ecs-anywhere
+# installer) and the user config (/etc/ecs/ecs.config); dcgm-init must honor the
+# same two sources or it can stay gated off (exit 5, no restart) while the Agent
+# enables GPU support — leaving the GPU health check on INSUFFICIENT_DATA forever.
+# Load instance config first, then user config, so user config wins on conflict
+# (later EnvironmentFile entries override earlier ones). Leading '-' makes each
+# file optional so dcgm-init still starts if either is absent.
+EnvironmentFile=-/var/lib/ecs/ecs.config
 EnvironmentFile=-/etc/ecs/ecs.config
 ExecStart=/usr/libexec/dcgm-init start
 
