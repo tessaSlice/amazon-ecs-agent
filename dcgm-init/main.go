@@ -95,7 +95,7 @@ func configureLogging() {
 
 	logDir := filepath.Dir(logFile)
 	if err := os.MkdirAll(logDir, logDirPermission); err != nil {
-		logger.Warn("dcgm-init could not create log directory %s; not writing %s: %v", logDir, logFile, err)
+		seelog.Warnf("dcgm-init could not create log directory %s; not writing %s: %v", logDir, logFile, err)
 		return
 	}
 	logger.SetConfigLogFile(logFile)
