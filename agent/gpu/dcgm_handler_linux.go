@@ -85,11 +85,11 @@ func NewDCGMHandler(filePath string) *DCGMHandler {
 //
 // Before reading, it verifies (in order) that the containing directory exists,
 // that the metrics file exists inside it, and that this process can read the
-// file. The directory and file are provided to the agent container as a
-// read-only bind mount of the host's /var/run/ecs, which dcgm-init creates and
-// writes at runtime (it is not shipped in the RPM), so any of these checks
-// failing means dcgm-init has not produced metrics yet; that is an expected
-// transient state, logged at Debug and surfaced as nil.
+// file. The directory and file are provided to the agent container as a bind
+// mount of the host's /var/run/ecs, which dcgm-init creates and writes at
+// runtime (it is not shipped in the RPM), so any of these checks failing means
+// dcgm-init has not produced metrics yet; that is an expected transient state,
+// logged at Debug and surfaced as nil.
 func (h *DCGMHandler) GetGPUMetrics() *GPUMetricsResult {
 	// 1. The containing directory must exist and be a directory.
 	dir := filepath.Dir(h.filePath)
