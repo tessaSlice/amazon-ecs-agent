@@ -193,9 +193,7 @@ test-init:
 
 .PHONY: build-dcgm-init test-dcgm-init
 build-dcgm-init:
-	# Stamp the version at link time via -ldflags -X (like scripts/gobuild.sh does
-	# for ecs-init), so the build does not modify the tracked version.go files.
-	version=$$(cat ecs-init/ECSVERSION); \
+	version=$$(cat VERSION); \
 	git_hash=$$(git rev-parse --short=8 HEAD); \
 	git_dirty=false; \
 	if [ -n "$$(git status --porcelain)" ]; then git_dirty=true; fi; \
