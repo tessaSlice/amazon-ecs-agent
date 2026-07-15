@@ -8,7 +8,6 @@ _bin/
 *.swp
 *.orig
 /ecs-agent/daemonimages/csidriver/tarfiles
-/ecs-agent/daemonimages/csidriver/tarfiles
 .agignore
 *.sublime-*
 .DS_Store
@@ -23,7 +22,7 @@ cover.out
 cover.out.tmp
 coverprofile*.out
 /amazon-ecs-init*
-/amazon-dcgm-init
+/amazon-dcgm-init*
 /BUILDROOT/
 /x86_64/
 /sources.tar
