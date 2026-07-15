@@ -7,10 +7,7 @@ _bin/
 *.zip
 *.swp
 *.orig
-/agent/version/_version.go
 /ecs-agent/daemonimages/csidriver/tarfiles
-/ecs-init/version/version.go
-/dcgm-init/version/version.go
 /ecs-agent/daemonimages/csidriver/tarfiles
 .agignore
 *.sublime-*
