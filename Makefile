@@ -193,8 +193,17 @@ test-init:
 
 .PHONY: build-dcgm-init test-dcgm-init
 build-dcgm-init:
-	cd dcgm-init && CGO_ENABLED=1 \
-		go build -mod=vendor -ldflags "-s" -o ../amazon-dcgm-init .
+	# Stamp the version at link time via -ldflags -X (like scripts/gobuild.sh does
+	# for ecs-init), so the build does not modify the tracked version.go files.
+	version=$$(cat ecs-init/ECSVERSION); \
+	git_hash=$$(git rev-parse --short=8 HEAD); \
+	git_dirty=false; \
+	if [ -n "$$(git status --porcelain)" ]; then git_dirty=true; fi; \
+	cd dcgm-init && CGO_ENABLED=1 go build -mod=vendor -ldflags "-s \
+		-X github.com/aws/amazon-ecs-agent/dcgm-init/version.Version=$${version} \
+		-X github.com/aws/amazon-ecs-agent/dcgm-init/version.GitShortHash=$${git_hash} \
+		-X github.com/aws/amazon-ecs-agent/dcgm-init/version.GitDirty=$${git_dirty}" \
+		-o ../amazon-dcgm-init .
 
 test-dcgm-init:
 	cd dcgm-init && GO111MODULE=on ${GOTEST} ${VERBOSE} -tags unit -mod vendor \
@@ -567,7 +576,7 @@ clean:
 	-rm -rf ./BUILDROOT BUILD RPMS SRPMS SOURCES SPECS
 	-rm -rf ./x86_64
 	-rm -f ./amazon-ecs-init_${VERSION}*
-	-rm -f .srpm-done .rpm-done .generic-rpm-done .generic-deb-integrated-done
+	-rm -f .srpm-done .rpm-done .generic-rpm-done .generic-deb-integrated-done .amazon-linux-rpm-codebuild-done
 	-rm -f .deb-done
 	-rm -f .amazon-linux-rpm-integrated-done
 	-rm -f .generic-rpm-integrated-done
