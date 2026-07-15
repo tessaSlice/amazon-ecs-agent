@@ -380,7 +380,7 @@ container-health-check-image:
 	$(MAKE) -C misc/container-health $(MFLAGS)
 
 # all .go files in the agent, excluding vendor/, model/ and testutils/ directories, and all *_test.go and *_mocks.go files
-GOFILES:=$(shell go list -f '{{$$p := .}}{{range $$f := .GoFiles}}{{$$p.Dir}}/{{$$f}} {{end}}' ./agent/... ./ecs-agent/... \
+GOFILES:=$(shell go list -f '{{$$p := .}}{{range $$f := .GoFiles}}{{$$p.Dir}}/{{$$f}} {{end}}' ./agent/... ./ecs-agent/... ./dcgm-init/... \
 		| grep -v /testutils/ | grep -v _test\.go$ | grep -v _mocks\.go$ | grep -v /model)
 
 .PHONY: gocyclo
@@ -391,9 +391,9 @@ gocyclo:
 # same as gofiles above, but without the `-f`
 .PHONY: govet
 govet:
-	go vet $(shell go list ./agent/... ./ecs-agent/... | grep -v /testutils/ | grep -v _test\.go$ | grep -v /mocks | grep -v /model)
+	go vet $(shell go list ./agent/... ./ecs-agent/... ./dcgm-init/... | grep -v /testutils/ | grep -v _test\.go$ | grep -v /mocks | grep -v /model)
 
-GOFMTFILES:=$(shell find ./agent ./ecs-agent -not -path './agent/vendor/*' -not -path './ecs-agent/vendor/*' -not -path './ecs-agent/daemonimages/csidriver/vendor/*' -type f -iregex '.*\.go')
+GOFMTFILES:=$(shell find ./agent ./ecs-agent ./dcgm-init -not -path './agent/vendor/*' -not -path './ecs-agent/vendor/*' -not -path './ecs-agent/daemonimages/csidriver/vendor/*' -not -path './dcgm-init/vendor/*' -type f -iregex '.*\.go')
 
 .PHONY: importcheck
 importcheck:
