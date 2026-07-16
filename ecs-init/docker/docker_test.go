@@ -371,16 +371,20 @@ func TestStartAgentEnvFile(t *testing.T) {
 	}
 }
 func TestStartAgentWithGPUConfig(t *testing.T) {
-	// The GPU metrics dir is created on the host before it's bind mounted; when
-	// creation fails the bind is skipped so we never mount a nonexistent path.
-	// The GPU info dir bind is present regardless.
+	// With GPU support enabled: when NVIDIA devices are present the GPU info dir
+	// is bind mounted, and the GPU metrics dir is created on the host and bind
+	// mounted too. If the metrics dir can't be created its bind is skipped so we
+	// never mount a nonexistent path. When no devices are present neither binds.
 	testCases := []struct {
 		name              string
+		devicesPresent    bool
 		mkdirErr          error
+		expectInfoBind    bool
 		expectMetricsBind bool
 	}{
-		{name: "metrics dir created", mkdirErr: nil, expectMetricsBind: true},
-		{name: "metrics dir creation fails", mkdirErr: errors.New("permission denied"), expectMetricsBind: false},
+		{name: "metrics dir created", devicesPresent: true, mkdirErr: nil, expectInfoBind: true, expectMetricsBind: true},
+		{name: "metrics dir creation fails", devicesPresent: true, mkdirErr: errors.New("permission denied"), expectInfoBind: true, expectMetricsBind: false},
+		{name: "no gpu devices", devicesPresent: false, expectInfoBind: false, expectMetricsBind: false},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -401,6 +405,9 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 			}()
 
 			MatchFilePatternForGPU = func(pattern string) ([]string, error) {
+				if !tc.devicesPresent {
+					return nil, nil
+				}
 				return []string{"/dev/nvidia0", "/dev/nvidia1"}, nil
 			}
 			defer func() {
@@ -424,8 +431,13 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 			mockFS.EXPECT().ReadFile(config.AgentConfigFile()).Return(nil, errors.New("not found")).AnyTimes()
 			mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
 				validateCommonCreateContainerOptions(t, opts)
-				assert.Contains(t, opts.HostConfig.Binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
+				infoBind := gpu.GPUInfoDirPath + ":" + gpu.GPUInfoDirPath
 				metricsBind := gputypes.GPUMetricsDirPath + ":" + gputypes.GPUMetricsDirPath
+				if tc.expectInfoBind {
+					assert.Contains(t, opts.HostConfig.Binds, infoBind)
+				} else {
+					assert.NotContains(t, opts.HostConfig.Binds, infoBind)
+				}
 				if tc.expectMetricsBind {
 					assert.Contains(t, opts.HostConfig.Binds, metricsBind)
 				} else {
@@ -446,62 +458,6 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
-}
-
-func TestStartAgentWithGPUConfigNoDevices(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-	isPathValid = func(path string, isDir bool) bool {
-		return false
-	}
-	defer func() {
-		isPathValid = defaultIsPathValid
-	}()
-
-	config.OsStat = func(name string) (os.FileInfo, error) {
-		return nil, nil
-	}
-	defer func() {
-		config.OsStat = os.Stat
-	}()
-
-	envFile := "\nECS_ENABLE_GPU_SUPPORT=true\n"
-	containerID := "container id"
-
-	defer func() {
-		MatchFilePatternForGPU = FilePatternMatchForGPU
-	}()
-	MatchFilePatternForGPU = func(pattern string) ([]string, error) {
-		// matches is nil
-		return nil, nil
-	}
-
-	mockFS := NewMockfileSystem(mockCtrl)
-	mockDocker := NewMockdockerclient(mockCtrl)
-
-	mockFS.EXPECT().ReadFile(config.InstanceConfigFile()).Return([]byte(envFile), nil).AnyTimes()
-	mockFS.EXPECT().ReadFile(config.AgentConfigFile()).Return(nil, errors.New("not found")).AnyTimes()
-	mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
-		validateCommonCreateContainerOptions(t, opts)
-		cfg := opts.Config
-
-		envVariables := make(map[string]struct{})
-		for _, envVar := range cfg.Env {
-			envVariables[envVar] = struct{}{}
-		}
-	}).Return(&godocker.Container{
-		ID: containerID,
-	}, nil)
-	mockDocker.EXPECT().StartContainer(containerID, nil)
-	mockDocker.EXPECT().WaitContainer(containerID)
-
-	client := &client{
-		docker: mockDocker,
-		fs:     mockFS,
-	}
-
-	_, err := client.StartAgent()
-	assert.NoError(t, err)
 }
 
 func TestNvidiaGPUDevicesPresentWithRetries(t *testing.T) {
