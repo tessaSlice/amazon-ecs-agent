@@ -113,8 +113,7 @@ const (
 
 	execAgentLogRelativePath = "/exec"
 
-	// gpuMetricsDirPerm is the permission used when creating the GPU metrics
-	// directory on the host before bind mounting it into the Agent container.
+	// gpuMetricsDirPerm is the permission for the GPU metrics dir created on the host.
 	gpuMetricsDirPerm os.FileMode = 0755
 
 	// nvidiaGPUDevicesPresentRetryTime specifies the duration of time to wait before retrying to check if NVIDIA
@@ -170,6 +169,7 @@ var (
 	execCommand                   = exec.Command
 	execLookPath                  = exec.LookPath
 	checkNvidiaGPUDevicesPresence = nvidiaGPUDevicesPresent
+	mkdirAll                      = os.MkdirAll
 	// ErrNoBridgeNetwork indicates no docker bridge network interface was found
 	ErrNoBridgeNetwork = errors.New(
 		"unable to find any virtual docker bridge network interfaces on the host")
@@ -492,7 +492,7 @@ func (c *client) getHostConfig(envVarsFromFiles map[string]string) *godocker.Hos
 				// bind mount gpu info dir
 				binds = append(binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
 				// Ensure the gpu metrics dir exists on the host before bind mounting it.
-				if err := os.MkdirAll(gputypes.GPUMetricsDirPath, gpuMetricsDirPerm); err != nil {
+				if err := mkdirAll(gputypes.GPUMetricsDirPath, gpuMetricsDirPerm); err != nil {
 					log.Errorf("Failed to create gpu metrics directory %s, skipping bind mount: %v", gputypes.GPUMetricsDirPath, err)
 				} else {
 					// bind mount gpu metrics dir

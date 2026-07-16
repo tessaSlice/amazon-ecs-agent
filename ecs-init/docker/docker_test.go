@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/aws/amazon-ecs-agent/ecs-init/config"
 	"github.com/aws/amazon-ecs-agent/ecs-init/gpu"
 	godocker "github.com/fsouza/go-dockerclient"
@@ -370,67 +371,81 @@ func TestStartAgentEnvFile(t *testing.T) {
 	}
 }
 func TestStartAgentWithGPUConfig(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-	isPathValid = func(path string, isDir bool) bool {
-		return false
+	// The GPU metrics dir is created on the host before it's bind mounted; when
+	// creation fails the bind is skipped so we never mount a nonexistent path.
+	// The GPU info dir bind is present regardless.
+	testCases := []struct {
+		name              string
+		mkdirErr          error
+		expectMetricsBind bool
+	}{
+		{name: "metrics dir created", mkdirErr: nil, expectMetricsBind: true},
+		{name: "metrics dir creation fails", mkdirErr: errors.New("permission denied"), expectMetricsBind: false},
 	}
-	defer func() {
-		isPathValid = defaultIsPathValid
-	}()
-
-	config.OsStat = func(name string) (os.FileInfo, error) {
-		return nil, nil
-	}
-	defer func() {
-		config.OsStat = os.Stat
-	}()
-
-	envFile := "\nECS_ENABLE_GPU_SUPPORT=true\n"
-	containerID := "container id"
-
-	defer func() {
-		MatchFilePatternForGPU = FilePatternMatchForGPU
-	}()
-	MatchFilePatternForGPU = func(pattern string) ([]string, error) {
-		return []string{"/dev/nvidia0", "/dev/nvidia1"}, nil
-	}
-
-	mockFS := NewMockfileSystem(mockCtrl)
-	mockDocker := NewMockdockerclient(mockCtrl)
-
-	mockFS.EXPECT().ReadFile(config.InstanceConfigFile()).Return([]byte(envFile), nil).AnyTimes()
-	mockFS.EXPECT().ReadFile(config.AgentConfigFile()).Return(nil, errors.New("not found")).AnyTimes()
-	mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
-		validateCommonCreateContainerOptions(t, opts)
-		var found bool
-		for _, bind := range opts.HostConfig.Binds {
-			if bind == gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath {
-				found = true
-				break
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
+			isPathValid = func(path string, isDir bool) bool {
+				return false
 			}
-		}
-		assert.True(t, found)
+			defer func() {
+				isPathValid = defaultIsPathValid
+			}()
 
-		cfg := opts.Config
+			config.OsStat = func(name string) (os.FileInfo, error) {
+				return nil, nil
+			}
+			defer func() {
+				config.OsStat = os.Stat
+			}()
 
-		envVariables := make(map[string]struct{})
-		for _, envVar := range cfg.Env {
-			envVariables[envVar] = struct{}{}
-		}
-	}).Return(&godocker.Container{
-		ID: containerID,
-	}, nil)
-	mockDocker.EXPECT().StartContainer(containerID, nil)
-	mockDocker.EXPECT().WaitContainer(containerID)
+			MatchFilePatternForGPU = func(pattern string) ([]string, error) {
+				return []string{"/dev/nvidia0", "/dev/nvidia1"}, nil
+			}
+			defer func() {
+				MatchFilePatternForGPU = FilePatternMatchForGPU
+			}()
 
-	client := &client{
-		docker: mockDocker,
-		fs:     mockFS,
+			mkdirAll = func(path string, perm os.FileMode) error {
+				return tc.mkdirErr
+			}
+			defer func() {
+				mkdirAll = os.MkdirAll
+			}()
+
+			envFile := "\nECS_ENABLE_GPU_SUPPORT=true\n"
+			containerID := "container id"
+
+			mockFS := NewMockfileSystem(mockCtrl)
+			mockDocker := NewMockdockerclient(mockCtrl)
+
+			mockFS.EXPECT().ReadFile(config.InstanceConfigFile()).Return([]byte(envFile), nil).AnyTimes()
+			mockFS.EXPECT().ReadFile(config.AgentConfigFile()).Return(nil, errors.New("not found")).AnyTimes()
+			mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
+				validateCommonCreateContainerOptions(t, opts)
+				assert.Contains(t, opts.HostConfig.Binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
+				metricsBind := gputypes.GPUMetricsDirPath + ":" + gputypes.GPUMetricsDirPath
+				if tc.expectMetricsBind {
+					assert.Contains(t, opts.HostConfig.Binds, metricsBind)
+				} else {
+					assert.NotContains(t, opts.HostConfig.Binds, metricsBind)
+				}
+			}).Return(&godocker.Container{
+				ID: containerID,
+			}, nil)
+			mockDocker.EXPECT().StartContainer(containerID, nil)
+			mockDocker.EXPECT().WaitContainer(containerID)
+
+			client := &client{
+				docker: mockDocker,
+				fs:     mockFS,
+			}
+
+			_, err := client.StartAgent()
+			assert.NoError(t, err)
+		})
 	}
-
-	_, err := client.StartAgent()
-	assert.NoError(t, err)
 }
 
 func TestStartAgentWithGPUConfigNoDevices(t *testing.T) {
