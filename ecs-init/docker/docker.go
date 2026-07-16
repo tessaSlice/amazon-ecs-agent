@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/utils"
 	"github.com/aws/amazon-ecs-agent/ecs-init/backoff"
 	"github.com/aws/amazon-ecs-agent/ecs-init/config"
@@ -111,6 +112,10 @@ const (
 	execConfigRelativePath = "config"
 
 	execAgentLogRelativePath = "/exec"
+
+	// gpuMetricsDirPerm is the permission used when creating the GPU metrics
+	// directory on the host before bind mounting it into the Agent container.
+	gpuMetricsDirPerm os.FileMode = 0755
 
 	// nvidiaGPUDevicesPresentRetryTime specifies the duration of time to wait before retrying to check if NVIDIA
 	// GPU devices are present.
@@ -486,6 +491,13 @@ func (c *client) getHostConfig(envVarsFromFiles map[string]string) *godocker.Hos
 			if nvidiaGPUDevicesPresent() {
 				// bind mount gpu info dir
 				binds = append(binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
+				// Ensure the gpu metrics dir exists on the host before bind mounting it.
+				if err := os.MkdirAll(gputypes.GPUMetricsDirPath, gpuMetricsDirPerm); err != nil {
+					log.Errorf("Failed to create gpu metrics directory %s, skipping bind mount: %v", gputypes.GPUMetricsDirPath, err)
+				} else {
+					// bind mount gpu metrics dir
+					binds = append(binds, gputypes.GPUMetricsDirPath+":"+gputypes.GPUMetricsDirPath)
+				}
 			}
 		}
 
