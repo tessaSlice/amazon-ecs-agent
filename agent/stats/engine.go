@@ -476,6 +476,7 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 }
 
 func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool) {
+	// TODO: publish task level GPU metrics here
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
 	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
@@ -517,6 +518,7 @@ func (engine *DockerStatsEngine) publishHealth() {
 
 // GetInstanceMetrics gets all task metrics and instance metadata from stats engine.
 func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
+	// TODO: publish instance level GPU metrics here
 	idle := engine.isIdle()
 	metricsMetadata := &ecstcs.MetricsMetadata{
 		Cluster:           aws.String(engine.cluster),
