@@ -371,10 +371,6 @@ func TestStartAgentEnvFile(t *testing.T) {
 	}
 }
 func TestStartAgentWithGPUConfig(t *testing.T) {
-	// With GPU support enabled: when NVIDIA devices are present the GPU info dir
-	// is bind mounted, and the GPU metrics dir is created on the host and bind
-	// mounted too. If the metrics dir can't be created its bind is skipped so we
-	// never mount a nonexistent path. When no devices are present neither binds.
 	testCases := []struct {
 		name           string
 		devicesPresent bool
@@ -442,8 +438,6 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 
 			mockFS.EXPECT().ReadFile(config.InstanceConfigFile()).Return([]byte(envFile), nil).AnyTimes()
 			mockFS.EXPECT().ReadFile(config.AgentConfigFile()).Return(nil, errors.New("not found")).AnyTimes()
-			// Both GPU binds are added only when devices are present; the metrics
-			// bind additionally requires the metrics dir to be created successfully.
 			expectInfoBind := tc.devicesPresent
 			expectMetricsBind := tc.devicesPresent && tc.mkdirErr == nil
 			mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
@@ -457,7 +451,6 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 				}
 				if expectMetricsBind {
 					assert.Contains(t, opts.HostConfig.Binds, metricsBind)
-					// The dir that was created must match the one bind mounted.
 					assert.Equal(t, gputypes.GPUMetricsDirPath, gotMkdirPath)
 					assert.Equal(t, gpuMetricsDirPerm, gotMkdirPerm)
 				} else {
