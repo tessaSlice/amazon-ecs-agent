@@ -376,15 +376,24 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 	// mounted too. If the metrics dir can't be created its bind is skipped so we
 	// never mount a nonexistent path. When no devices are present neither binds.
 	testCases := []struct {
-		name              string
-		devicesPresent    bool
-		mkdirErr          error
-		expectInfoBind    bool
-		expectMetricsBind bool
+		name           string
+		devicesPresent bool
+		mkdirErr       error
 	}{
-		{name: "metrics dir created", devicesPresent: true, mkdirErr: nil, expectInfoBind: true, expectMetricsBind: true},
-		{name: "metrics dir creation fails", devicesPresent: true, mkdirErr: errors.New("permission denied"), expectInfoBind: true, expectMetricsBind: false},
-		{name: "no gpu devices", devicesPresent: false, expectInfoBind: false, expectMetricsBind: false},
+		{
+			name:           "metrics dir created",
+			devicesPresent: true,
+			mkdirErr:       nil,
+		},
+		{
+			name:           "metrics dir creation fails",
+			devicesPresent: true,
+			mkdirErr:       errors.New("permission denied"),
+		},
+		{
+			name:           "no gpu devices",
+			devicesPresent: false,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -414,7 +423,11 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 				MatchFilePatternForGPU = FilePatternMatchForGPU
 			}()
 
+			var gotMkdirPath string
+			var gotMkdirPerm os.FileMode
 			mkdirAll = func(path string, perm os.FileMode) error {
+				gotMkdirPath = path
+				gotMkdirPerm = perm
 				return tc.mkdirErr
 			}
 			defer func() {
@@ -429,17 +442,24 @@ func TestStartAgentWithGPUConfig(t *testing.T) {
 
 			mockFS.EXPECT().ReadFile(config.InstanceConfigFile()).Return([]byte(envFile), nil).AnyTimes()
 			mockFS.EXPECT().ReadFile(config.AgentConfigFile()).Return(nil, errors.New("not found")).AnyTimes()
+			// Both GPU binds are added only when devices are present; the metrics
+			// bind additionally requires the metrics dir to be created successfully.
+			expectInfoBind := tc.devicesPresent
+			expectMetricsBind := tc.devicesPresent && tc.mkdirErr == nil
 			mockDocker.EXPECT().CreateContainer(gomock.Any()).Do(func(opts godocker.CreateContainerOptions) {
 				validateCommonCreateContainerOptions(t, opts)
 				infoBind := gpu.GPUInfoDirPath + ":" + gpu.GPUInfoDirPath
 				metricsBind := gputypes.GPUMetricsDirPath + ":" + gputypes.GPUMetricsDirPath
-				if tc.expectInfoBind {
+				if expectInfoBind {
 					assert.Contains(t, opts.HostConfig.Binds, infoBind)
 				} else {
 					assert.NotContains(t, opts.HostConfig.Binds, infoBind)
 				}
-				if tc.expectMetricsBind {
+				if expectMetricsBind {
 					assert.Contains(t, opts.HostConfig.Binds, metricsBind)
+					// The dir that was created must match the one bind mounted.
+					assert.Equal(t, gputypes.GPUMetricsDirPath, gotMkdirPath)
+					assert.Equal(t, gpuMetricsDirPerm, gotMkdirPerm)
 				} else {
 					assert.NotContains(t, opts.HostConfig.Binds, metricsBind)
 				}
