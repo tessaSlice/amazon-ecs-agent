@@ -68,13 +68,14 @@ func (mr *MockEngineMockRecorder) ContainerDockerStats(arg0, arg1 interface{}) *
 }
 
 // GetInstanceMetrics mocks base method.
-func (m *MockEngine) GetInstanceMetrics(arg0 bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
+func (m *MockEngine) GetInstanceMetrics(arg0 bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetInstanceMetrics", arg0)
 	ret0, _ := ret[0].(*ecstcs.MetricsMetadata)
 	ret1, _ := ret[1].([]*ecstcs.TaskMetric)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret2, _ := ret[2].(*ecstcs.InstanceMetrics)
+	ret3, _ := ret[3].(error)
+	return ret0, ret1, ret2, ret3
 }
 
 // GetInstanceMetrics indicates an expected call of GetInstanceMetrics.

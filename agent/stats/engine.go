@@ -78,7 +78,7 @@ type DockerContainerMetadataResolver struct {
 // Engine defines methods to be implemented by the engine struct. It is
 // defined to make testing easier.
 type Engine interface {
-	GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error)
+	GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error)
 	ContainerDockerStats(taskARN string, containerID string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error)
 	GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error)
 	GetPublishServiceConnectTickerInterval() int32
@@ -479,11 +479,12 @@ func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool)
 	// TODO: publish task level GPU metrics here
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
-	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
+	metricsMetadata, taskMetrics, instanceMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
 	if metricsErr == nil {
 		metricsMessage := ecstcs.TelemetryMessage{
-			Metadata:    metricsMetadata,
-			TaskMetrics: taskMetrics,
+			InstanceMetrics: instanceMetrics,
+			Metadata:        metricsMetadata,
+			TaskMetrics:     taskMetrics,
 		}
 		select {
 		case engine.metricsChannel <- metricsMessage:
@@ -516,9 +517,12 @@ func (engine *DockerStatsEngine) publishHealth() {
 	}
 }
 
-// GetInstanceMetrics gets all task metrics and instance metadata from stats engine.
-func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
+// GetInstanceMetrics gets all task metrics, instance metrics, and instance
+// metadata from stats engine. The returned *ecstcs.InstanceMetrics is nil until
+// a producer populates it.
+func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
 	// TODO: publish instance level GPU metrics here
+	var instanceMetrics *ecstcs.InstanceMetrics
 	idle := engine.isIdle()
 	metricsMetadata := &ecstcs.MetricsMetadata{
 		Cluster:           aws.String(engine.cluster),
@@ -532,7 +536,7 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 		seelog.Debug("Instance is idle. No task metrics to report")
 		fin := true
 		metricsMetadata.Fin = &fin
-		return metricsMetadata, taskMetrics, nil
+		return metricsMetadata, taskMetrics, instanceMetrics, nil
 	}
 
 	engine.lock.Lock()
@@ -601,11 +605,11 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 	if len(taskMetrics) == 0 {
 		// Not idle. Expect taskMetrics to be there.
 		seelog.Debugf("Return empty metrics error")
-		return nil, nil, EmptyMetricsError
+		return nil, nil, nil, EmptyMetricsError
 	}
 
 	engine.resetStatsUnsafe()
-	return metricsMetadata, taskMetrics, nil
+	return metricsMetadata, taskMetrics, instanceMetrics, nil
 }
 
 // GetTaskHealthMetrics returns the container health metrics

@@ -134,7 +134,7 @@ func TestStatsEngineAddRemoveContainers(t *testing.T) {
 		t.Errorf("Error validating container metrics: %v", err)
 	}
 
-	metadata, taskMetrics, err := engine.GetInstanceMetrics(false)
+	metadata, taskMetrics, _, err := engine.GetInstanceMetrics(false)
 	if err != nil {
 		t.Errorf("Error gettting instance metrics: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestStatsEngineAddRemoveContainers(t *testing.T) {
 		t.Errorf("Error validating container metrics: %v", err)
 	}
 
-	metadata, taskMetrics, err = engine.GetInstanceMetrics(true)
+	metadata, taskMetrics, _, err = engine.GetInstanceMetrics(true)
 	if err != nil {
 		t.Errorf("Error gettting instance metrics: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestStatsEngineAddRemoveContainers(t *testing.T) {
 		t.Error("Container c3 not found in engine")
 	}
 
-	_, _, err = engine.GetInstanceMetrics(false)
+	_, _, _, err = engine.GetInstanceMetrics(false)
 	if err == nil {
 		t.Error("Expected non-empty error for empty stats.")
 	}
@@ -295,7 +295,7 @@ func TestStatsEngineMetadataInStatsSets(t *testing.T) {
 			statsContainer.statsQueue.setLastStat(dockerStats[i])
 		}
 	}
-	metadata, taskMetrics, err := engine.GetInstanceMetrics(false)
+	metadata, taskMetrics, _, err := engine.GetInstanceMetrics(false)
 	if err != nil {
 		t.Errorf("Error gettting instance metrics: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestGetInstanceMetricsNonIdleEmptyError(t *testing.T) {
 	}
 
 	engine.resolver = resolver
-	_, taskMetric, err := engine.GetInstanceMetrics(false)
+	_, taskMetric, _, err := engine.GetInstanceMetrics(false)
 	assert.Len(t, taskMetric, 0)
 	assert.Equal(t, err, EmptyMetricsError)
 }
@@ -843,7 +843,7 @@ func testNetworkModeStats(t *testing.T, netMode string, enis []*ni.NetworkInterf
 			statsContainer.statsQueue.setLastStat(dockerStats[i])
 		}
 	}
-	_, taskMetrics, err := engine.GetInstanceMetrics(false)
+	_, taskMetrics, _, err := engine.GetInstanceMetrics(false)
 	assert.NoError(t, err)
 	assert.Len(t, taskMetrics, 1)
 	for _, containerMetric := range taskMetrics[0].ContainerMetrics {
