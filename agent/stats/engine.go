@@ -38,11 +38,13 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/csiclient"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/eventstream"
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/stats"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 
@@ -58,6 +60,10 @@ const (
 	// defaultPublishServiceConnectTicker is every 3rd time service connect metrics will be sent to the backend
 	// Task metrics are published at 20s interval, thus task's service metrics will be published 60s.
 	defaultPublishServiceConnectTicker = 3
+	// gpuMetricsPublishTickInterval fetches GPU metrics every 3rd publish tick.
+	// Task metrics publish every 20s (config.DefaultContainerMetricsPublishInterval),
+	// so GPU metrics are emitted roughly every 60s.
+	gpuMetricsPublishTickInterval = 3
 )
 
 var (
@@ -115,6 +121,28 @@ type DockerStatsEngine struct {
 
 	csiClient  csiclient.CSIClient
 	dataClient data.Client
+
+	// dcgmMetricsReader reads GPU metrics from the shared file written by dcgm-init.
+	dcgmMetricsReader *gpu.DCGMMetricsReader
+	// gpuMetricsPublishCount tracks ticks to emit GPU metrics every 60s (3 ticks at 20s).
+	gpuMetricsPublishCount int
+	// lastGPUTimestamp is the container-level GPU de-dup cursor: the timestamp of the
+	// last sample whose per-container GPU metrics were actually emitted to TACS.
+	// Advanced only when a tick actually shipped a per-container GPU payload (a
+	// container-fresh snapshot AND at least one container carried GPU metrics), so a
+	// send that carried no container GPU metrics (an idle send, an instance-only
+	// send, or a tick with only non-GPU tasks) does not consume a sample the
+	// container path still needs.
+	lastGPUTimestamp string
+	// lastInstanceGPUTimestamp is the instance-level GPU de-dup cursor: the timestamp of
+	// the last sample whose instance-level GPU metrics were emitted. Advanced on every
+	// send that carried an instance payload (including instance-only sends), so a frozen
+	// dcgm-init file is not re-published as instance metrics every cycle. Between
+	// sends, lastGPUTimestamp <= lastInstanceGPUTimestamp (the container cursor
+	// does not run ahead of the instance cursor; the two commits are separate lock
+	// acquisitions, so mid-send the ordering may transiently reverse — harmless,
+	// the sample is then simply judged not container-fresh).
+	lastInstanceGPUTimestamp string
 }
 
 // ResolveTask resolves the api task object, given container id.
@@ -172,6 +200,7 @@ func NewDockerStatsEngine(cfg *config.Config, client dockerapi.DockerClient, con
 		metricsChannel:                      metricsChannel,
 		healthChannel:                       healthChannel,
 		dataClient:                          dataClient,
+		dcgmMetricsReader:                   gpu.NewDCGMMetricsReader(""),
 	}
 }
 
@@ -478,20 +507,74 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool) {
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
-	metricsMetadata, taskMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
-	if metricsErr == nil {
-		metricsMessage := ecstcs.TelemetryMessage{
-			Metadata:    metricsMetadata,
-			TaskMetrics: taskMetrics,
+
+	// Read a per-tick GPU snapshot, only when GPU support is enabled (otherwise no
+	// dcgm-init writes the file, so this would be a wasted read + log lines every
+	// ~20s on non-GPU instances). gpuMetrics is non-nil only when the sample is
+	// container-fresh and emittable (see snapshotGPUMetrics); gpuInstanceFresh
+	// reports instance-level freshness. Cursors are advanced only after the
+	// message is sent (below).
+	var gpuMetrics []gputypes.GPUMetric
+	var gpuTimestamp string
+	var gpuInstanceFresh bool
+	if engine.config.GPUSupportEnabled {
+		gpuMetrics, gpuTimestamp, gpuInstanceFresh = engine.snapshotGPUMetrics()
+		seelog.Debugf("GPU metrics read: gpuCount=%d, gpuTimestamp=%q, instanceFresh=%t",
+			len(gpuMetrics), gpuTimestamp, gpuInstanceFresh)
+	}
+
+	metricsMetadata, taskMetrics, containerGPUShipped, metricsErr := engine.getInstanceMetrics(includeServiceConnectStats, gpuMetrics)
+
+	// Build the instance-level GPU payload only when this sample is instance-fresh,
+	// so a frozen/hung dcgm-init file (same timestamp re-read after its instance
+	// metrics were already sent) is not re-published every cycle. Built from the
+	// per-tick snapshot so a concurrent tick cannot nil it out from under us.
+	var instanceMetrics *ecstcs.InstanceMetrics
+	if gpuInstanceFresh {
+		if instancePayload := engine.instanceGPUPayload(gpuMetrics); instancePayload != nil {
+			instanceMetrics = &ecstcs.InstanceMetrics{
+				GeneralMetricsPayload: instancePayload,
+			}
+			seelog.Debugf("Built instance-level GPU metrics: wrapperCount=%d", len(instancePayload))
 		}
-		select {
-		case engine.metricsChannel <- metricsMessage:
-			seelog.Debugf("sent telemetry message")
-		case <-publishMetricsCtx.Done():
-			seelog.Errorf("timeout sending telemetry message, discarding metrics")
+	}
+
+	// EmptyMetricsError means the instance is not idle but had no task metrics this
+	// tick (e.g. containers still within their metrics grace period). We still want
+	// to publish instance-level GPU metrics in that case, so treat a metrics error
+	// as fatal only when there is no instance payload to carry. On any other error,
+	// there is nothing to send.
+	if metricsErr != nil {
+		if !errors.Is(metricsErr, EmptyMetricsError) || instanceMetrics == nil {
+			seelog.Warnf("Error collecting task metrics: %v", metricsErr)
+			return
 		}
-	} else {
-		seelog.Warnf("Error collecting task metrics: %v", metricsErr)
+		// Publish instance GPU metrics with no task metrics; synthesize the
+		// metadata getInstanceMetrics omits on EmptyMetricsError.
+		metricsMetadata = engine.instanceMetricsMetadata()
+	}
+
+	metricsMessage := ecstcs.TelemetryMessage{
+		Metadata:        metricsMetadata,
+		TaskMetrics:     taskMetrics,
+		InstanceMetrics: instanceMetrics,
+	}
+
+	select {
+	case engine.metricsChannel <- metricsMessage:
+		seelog.Debugf("sent telemetry message")
+		// Advance each cursor only after its metrics were actually sent, so a
+		// timed-out send is retried next cycle: the container cursor only when a
+		// per-container GPU payload shipped, the instance cursor whenever an
+		// instance payload shipped.
+		if containerGPUShipped {
+			engine.commitContainerGPUTimestamp(gpuTimestamp)
+		}
+		if instanceMetrics != nil {
+			engine.commitInstanceGPUTimestamp(gpuTimestamp)
+		}
+	case <-publishMetricsCtx.Done():
+		seelog.Errorf("timeout sending telemetry message, discarding metrics")
 	}
 }
 
@@ -517,20 +600,46 @@ func (engine *DockerStatsEngine) publishHealth() {
 
 // GetInstanceMetrics gets all task metrics and instance metadata from stats engine.
 func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
-	idle := engine.isIdle()
-	metricsMetadata := &ecstcs.MetricsMetadata{
+	// No per-tick GPU snapshot on this path; publishMetrics passes one directly.
+	metadata, taskMetrics, _, err := engine.getInstanceMetrics(includeServiceConnectStats, nil)
+	return metadata, taskMetrics, err
+}
+
+// instanceMetricsMetadata builds metadata for an instance-GPU-only publish (no
+// task metrics), which getInstanceMetrics does not supply on EmptyMetricsError.
+// Idle=true routes it through the TCS client's idle branch, which forwards
+// instance metrics without task metrics; the non-idle path would drop them. Idle
+// here means "no task metrics in this message", not that the instance is idle —
+// but note it IS serialized onto the request sent to TACS, so the backend must
+// treat idle as "no task metrics" rather than "instance has no tasks".
+func (engine *DockerStatsEngine) instanceMetricsMetadata() *ecstcs.MetricsMetadata {
+	return engine.newMetricsMetadata(true)
+}
+
+// newMetricsMetadata builds a MetricsMetadata stamped with this instance's
+// cluster/container-instance identity, the given idle flag, and a fresh message
+// id. Fin is left unset for the caller to fill in.
+func (engine *DockerStatsEngine) newMetricsMetadata(idle bool) *ecstcs.MetricsMetadata {
+	return &ecstcs.MetricsMetadata{
 		Cluster:           aws.String(engine.cluster),
 		ContainerInstance: aws.String(engine.containerInstanceArn),
 		Idle:              aws.Bool(idle),
 		MessageId:         aws.String(uuid.NewRandom().String()),
 	}
+}
 
-	var taskMetrics []*ecstcs.TaskMetric
+// getInstanceMetrics gets all task metrics and instance metadata. gpuMetrics is
+// the stable per-tick GPU snapshot (may be nil). containerGPUShipped reports
+// whether any returned container metric carries a GPU payload.
+func (engine *DockerStatsEngine) getInstanceMetrics(includeServiceConnectStats bool, gpuMetrics []gputypes.GPUMetric) (metadata *ecstcs.MetricsMetadata, taskMetrics []*ecstcs.TaskMetric, containerGPUShipped bool, err error) {
+	idle := engine.isIdle()
+	metricsMetadata := engine.newMetricsMetadata(idle)
+
 	if idle {
 		seelog.Debug("Instance is idle. No task metrics to report")
 		fin := true
 		metricsMetadata.Fin = &fin
-		return metricsMetadata, taskMetrics, nil
+		return metricsMetadata, nil, false, nil
 	}
 
 	engine.lock.Lock()
@@ -546,7 +655,7 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 	taskStatsToCollect := engine.getTaskStatsToCollect()
 	for taskArn := range taskStatsToCollect {
 		_, isServiceConnectTask := engine.taskToServiceConnectStats[taskArn]
-		containerMetrics, err := engine.taskContainerMetricsUnsafe(taskArn)
+		containerMetrics, gpuShipped, err := engine.taskContainerMetricsUnsafe(taskArn, gpuMetrics)
 		if err != nil {
 			seelog.Debugf("Error getting container metrics for task: %s, err: %v", taskArn, err)
 			// skip collecting service connect related metrics, if task is not service connect enabled.
@@ -594,16 +703,20 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 			}
 		}
 		taskMetrics = append(taskMetrics, taskMetric)
+		// Count GPU payloads only for task metrics that are actually included.
+		if gpuShipped {
+			containerGPUShipped = true
+		}
 	}
 
 	if len(taskMetrics) == 0 {
 		// Not idle. Expect taskMetrics to be there.
 		seelog.Debugf("Return empty metrics error")
-		return nil, nil, EmptyMetricsError
+		return nil, nil, false, EmptyMetricsError
 	}
 
 	engine.resetStatsUnsafe()
-	return metricsMetadata, taskMetrics, nil
+	return metricsMetadata, taskMetrics, containerGPUShipped, nil
 }
 
 // GetTaskHealthMetrics returns the container health metrics
@@ -810,15 +923,16 @@ func newDockerContainerMetadataResolver(taskEngine ecsengine.TaskEngine) (*Docke
 }
 
 // taskContainerMetricsUnsafe gets all container metrics for a task arn.
+// gpuMetrics is the stable per-tick GPU snapshot (may be nil). gpuShipped
+// reports whether any returned container metric carries a GPU payload.
 //
 //gocyclo:ignore
-func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*ecstcs.ContainerMetric, error) {
+func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string, gpuMetrics []gputypes.GPUMetric) (containerMetrics []*ecstcs.ContainerMetric, gpuShipped bool, err error) {
 	containerMap, taskExists := engine.tasksToContainers[taskArn]
 	if !taskExists {
-		return nil, fmt.Errorf("task not found")
+		return nil, false, fmt.Errorf("task not found")
 	}
 
-	var containerMetrics []*ecstcs.ContainerMetric
 	for _, container := range containerMap {
 		dockerID := container.containerMetadata.DockerID
 		// Check if the container is terminal. If it is, make sure that it is
@@ -889,6 +1003,11 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 			containerMetric.RestartStatsSet = restartStatsSet
 		}
 
+		// Resolve the container once per iteration; ResolveContainer is a
+		// side-effect-free state lookup, and both the network-stats block below
+		// and the GPU block further down need the same *DockerContainer.
+		dockerContainer, containerErr := engine.resolver.ResolveContainer(dockerID)
+
 		task, err := engine.resolver.ResolveTask(dockerID)
 		if err != nil {
 			logger.Warn("Task not found for container", logger.Fields{
@@ -896,10 +1015,10 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 				field.Error:     err,
 			})
 		} else {
-			if dockerContainer, err := engine.resolver.ResolveContainer(dockerID); err != nil {
+			if containerErr != nil {
 				logger.Warn("Could not map container ID to container, container", logger.Fields{
 					field.DockerId: dockerID,
-					field.Error:    err,
+					field.Error:    containerErr,
 				})
 			} else {
 				// send network stats for default/bridge/nat/awsvpc network modes
@@ -921,7 +1040,7 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 				} else if task.IsNetworkModeAWSVPC() {
 					taskStatsMap, taskExistsInTaskStats := engine.taskToTaskStats[taskArn]
 					if !taskExistsInTaskStats {
-						return nil, fmt.Errorf("task not found")
+						return nil, false, fmt.Errorf("task not found")
 					}
 					// do not add network stats for pause container
 					if dockerContainer.Container.Type != apicontainer.ContainerCNIPause {
@@ -939,9 +1058,323 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 				}
 			}
 		}
+		// Attach GPU metrics for the container's assigned GPUs from the per-tick
+		// snapshot. gpuMetricsForContainer returns nil for empty/unmatched IDs.
+		if len(gpuMetrics) > 0 && containerErr == nil {
+			if gpuPayload := gpuMetricsForContainer(gpuMetrics, dockerContainer.Container.GPUIDs); len(gpuPayload) > 0 {
+				containerMetric.GeneralMetricsPayload = gpuPayload
+				gpuShipped = true
+			}
+		}
+
 		containerMetrics = append(containerMetrics, containerMetric)
 	}
-	return containerMetrics, nil
+	return containerMetrics, gpuShipped, nil
+}
+
+// snapshotGPUMetrics fetches dcgm-init's metrics at most once every 3 ticks (~60s)
+// and returns them with their timestamp and an instanceFresh flag.
+//
+// metrics is non-nil only when the sample is container-fresh (newer than the
+// container cursor) AND emittable, so callers use len(metrics) > 0 instead of a
+// separate flag; on a throttled tick, a missing/empty/corrupt file, a
+// connection-lost sample, or one not newer than the container cursor, it
+// returns (nil, "", false) — the empty timestamp means "nothing read this tick",
+// never a stale cursor value.
+// instanceFresh reports whether it is also newer than the instance cursor. The
+// two differ after any send that carried an instance payload but no per-container
+// GPU payload (instance-only, idle, or task sends with no GPU payload): a re-read
+// is then still container-fresh but not instance-fresh, so container metrics ship
+// while a frozen sample is not re-published as instance metrics.
+//
+// It does NOT advance either cursor; commits happen only after a successful send
+// (see commitContainer/InstanceGPUTimestamp) so a dropped send is retried.
+//
+// GetGPUMetrics() runs without engine.lock (the lock guards only the 3-tick
+// counter and cursor reads). Overlapping ticks (a stalled send) are benign: the
+// read is idempotent and commits never regress a cursor.
+func (engine *DockerStatsEngine) snapshotGPUMetrics() (metrics []gputypes.GPUMetric, timestamp string, instanceFresh bool) {
+	engine.lock.Lock()
+	engine.gpuMetricsPublishCount++
+	shouldFetch := engine.gpuMetricsPublishCount >= gpuMetricsPublishTickInterval
+	if shouldFetch {
+		engine.gpuMetricsPublishCount = 0
+	}
+	lastContainerTimestamp := engine.lastGPUTimestamp
+	lastInstanceTimestamp := engine.lastInstanceGPUTimestamp
+	engine.lock.Unlock()
+
+	if !shouldFetch {
+		// Throttled by the 3-tick gate: emit no GPU metrics this tick.
+		return nil, "", false
+	}
+
+	gpuResult := engine.dcgmMetricsReader.GetGPUMetrics()
+	if gpuResult == nil || len(gpuResult.GPUs) == 0 {
+		// No file, unreadable/corrupt file, or an empty sample: nothing to emit.
+		return nil, "", false
+	}
+
+	// Skip emission when dcgm-init reports its DCGM connection lost (outside the
+	// grace period): while disconnected the sample's values are not trustworthy,
+	// so we would rather emit nothing than publish stale/garbage telemetry. Logged
+	// at Debug because this repeats every ~60s for the duration of an outage.
+	if gpuResult.ConnectionLost {
+		seelog.Debug("GPU metrics not emitted: dcgm-init reports connection_lost")
+		return nil, "", false
+	}
+
+	// Compare as parsed time rather than raw strings so the ordering does not
+	// silently depend on dcgm-init's exact RFC3339 rendering (a switch to
+	// fractional seconds or a numeric offset would break lexicographic ordering).
+	// GetGPUMetrics already rejects an unparseable fresh timestamp, and the cursors
+	// are only ever set from a previously-validated timestamp, so a parse error
+	// here is not expected; on the off chance one occurs, isNewerGPUTimestamp
+	// treats it as "not newer" and we skip emission rather than emit out of order.
+	if !isNewerGPUTimestamp(gpuResult.Timestamp, lastContainerTimestamp) {
+		// Not newer than the container cursor (and therefore not newer than the
+		// instance cursor either): the sample was already fully emitted. This is
+		// how a dead/hung dcgm-init with a frozen file stops being re-published.
+		return nil, "", false
+	}
+	instanceFresh = isNewerGPUTimestamp(gpuResult.Timestamp, lastInstanceTimestamp)
+	return gpuResult.GPUs, gpuResult.Timestamp, instanceFresh
+}
+
+// isNewerGPUTimestamp reports whether candidate is a strictly later instant than
+// last, both formatted as RFC3339 by dcgm-init. An empty last (no sample emitted
+// yet) makes any parseable candidate newer. If either fails to parse, it returns
+// false so a malformed timestamp never advances the de-dup cursor.
+func isNewerGPUTimestamp(candidate, last string) bool {
+	candidateTime, err := time.Parse(time.RFC3339, candidate)
+	if err != nil {
+		return false
+	}
+	if last == "" {
+		return true
+	}
+	lastTime, err := time.Parse(time.RFC3339, last)
+	if err != nil {
+		return false
+	}
+	return candidateTime.After(lastTime)
+}
+
+// commitContainerGPUTimestamp advances the container-level de-dup cursor after a
+// message carrying per-container GPU metrics has been sent.
+func (engine *DockerStatsEngine) commitContainerGPUTimestamp(timestamp string) {
+	engine.commitGPUTimestamp(&engine.lastGPUTimestamp, timestamp)
+}
+
+// commitInstanceGPUTimestamp advances the instance-level de-dup cursor after a
+// telemetry message carrying this sample's instance-level GPU metrics has been
+// sent (either a full send or an instance-only send). Guarded against regressing
+// the cursor.
+func (engine *DockerStatsEngine) commitInstanceGPUTimestamp(timestamp string) {
+	engine.commitGPUTimestamp(&engine.lastInstanceGPUTimestamp, timestamp)
+}
+
+// commitGPUTimestamp sets *cursor to timestamp under engine.lock, but only when
+// timestamp is strictly newer, so an out-of-order or repeated commit never
+// regresses a de-dup cursor.
+func (engine *DockerStatsEngine) commitGPUTimestamp(cursor *string, timestamp string) {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+	if isNewerGPUTimestamp(timestamp, *cursor) {
+		*cursor = timestamp
+	}
+}
+
+// instanceGPUPayload returns the instance-level GPU telemetry payload built from
+// the given per-tick GPU metrics snapshot, or nil if there are none. It reads
+// engine.tasksToContainers under engine.lock, but uses the caller-provided
+// snapshot for the GPU metrics so it stays consistent with the container-level
+// emission from the same tick and cannot be nilled by a concurrent
+// publishMetrics tick.
+//
+// The payload carries no wrapper dimensions: the TACS backend stamps the
+// instance-scoping dimensions itself, and attaching them here made its
+// dimension-set filter drop the wrapper on direct EC2 launches (no
+// CapacityProviderName), so the metrics never reached CloudWatch.
+func (engine *DockerStatsEngine) instanceGPUPayload(gpuMetrics []gputypes.GPUMetric) []*ecstcs.GeneralMetricsWrapper {
+	if len(gpuMetrics) == 0 {
+		return nil
+	}
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	usageTotal := engine.computeGPUUsageTotalUnsafe()
+	seelog.Debugf("Building instance GPU payload: gpuCount=%d, usageTotal=%d",
+		len(gpuMetrics), usageTotal)
+	return gpuMetricsToInstancePayload(gpuMetrics, usageTotal)
+}
+
+// computeGPUUsageTotalUnsafe counts the unique GPU device IDs assigned to running
+// task containers on this instance. Callers must hold engine.lock because it
+// iterates engine.tasksToContainers.
+func (engine *DockerStatsEngine) computeGPUUsageTotalUnsafe() int64 {
+	gpuSet := make(map[string]struct{})
+	for taskArn := range engine.tasksToContainers {
+		task, err := engine.resolver.ResolveTaskByARN(taskArn)
+		if err != nil {
+			continue
+		}
+		for _, container := range task.Containers {
+			for _, gpuID := range container.GPUIDs {
+				gpuSet[gpuID] = struct{}{}
+			}
+		}
+	}
+	return int64(len(gpuSet))
+}
+
+// GPU metric names and units as they appear in the TACS GeneralMetric payload.
+// Keep in sync with ecs-agent/gpu/gpu_metrics_conversion.go (and the Two
+// package's agent/actor/gpu_metrics_conversion.go): that package is linux-only
+// (no !linux stub) and not vendored into agent/, so the conversion is
+// duplicated here.
+const (
+	gpuMetricNameGPUUtilization        = "GPUUtilization"
+	gpuMetricNameGPUMemoryUtilization  = "GPUMemoryUtilization"
+	gpuMetricNameGPUMemoryTotal        = "GPUMemoryTotal"
+	gpuMetricNameGPUMemoryUsed         = "GPUMemoryUsed"
+	gpuMetricNameGPUPowerDraw          = "GPUPowerDraw"
+	gpuMetricNameGPUTemperature        = "GPUTemperature"
+	gpuMetricNameInstanceGPULimitCount = "InstanceGPULimit"
+	gpuMetricNameInstanceGPUUsageTotal = "InstanceGPUUsageTotal"
+	gpuMetricNameGPURestartAppXidCount = "GPURestartAppXidCount"
+
+	gpuMetricUnitPercent = "Percent"
+	gpuMetricUnitBytes   = "Bytes"
+	gpuMetricUnitNone    = "None"
+	gpuMetricUnitCount   = "Count"
+
+	// gpuDeviceDimensionKey identifies the GPU device on per-container wrappers.
+	gpuDeviceDimensionKey = "AcceleratedDevice"
+)
+
+// gpuMetricToGeneralMetricsWrapper converts one GPUMetric to a wrapper
+// dimensioned by its UUID. Only non-nil metric fields are included, plus the
+// XID count. Returns nil if all metric fields are nil.
+func gpuMetricToGeneralMetricsWrapper(m gputypes.GPUMetric) *ecstcs.GeneralMetricsWrapper {
+	var generalMetrics []*ecstcs.GeneralMetric
+
+	if m.GPUUtilization != nil {
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:        aws.String(gpuMetricNameGPUUtilization),
+			MetricValueDouble: m.GPUUtilization,
+			Unit:              aws.String(gpuMetricUnitPercent),
+		})
+	}
+	if m.MemoryUtilization != nil {
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:        aws.String(gpuMetricNameGPUMemoryUtilization),
+			MetricValueDouble: m.MemoryUtilization,
+			Unit:              aws.String(gpuMetricUnitPercent),
+		})
+	}
+	if m.MemoryTotal != nil {
+		v := int64(*m.MemoryTotal) //nolint:gosec // Max GPU memory (~141 GB) is far below int64 max.
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:      aws.String(gpuMetricNameGPUMemoryTotal),
+			MetricValueLong: &v,
+			Unit:            aws.String(gpuMetricUnitBytes),
+		})
+	}
+	if m.MemoryUsed != nil {
+		v := int64(*m.MemoryUsed) //nolint:gosec // Max GPU memory (~141 GB) is far below int64 max.
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:      aws.String(gpuMetricNameGPUMemoryUsed),
+			MetricValueLong: &v,
+			Unit:            aws.String(gpuMetricUnitBytes),
+		})
+	}
+	if m.PowerDraw != nil {
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:        aws.String(gpuMetricNameGPUPowerDraw),
+			MetricValueDouble: m.PowerDraw,
+			Unit:              aws.String(gpuMetricUnitNone),
+		})
+	}
+	if m.Temperature != nil {
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:        aws.String(gpuMetricNameGPUTemperature),
+			MetricValueDouble: m.Temperature,
+			Unit:              aws.String(gpuMetricUnitNone),
+		})
+	}
+	if len(generalMetrics) == 0 {
+		return nil
+	}
+
+	// Always emit the RESTART_APP XID count so customers see 0, not "No Data".
+	xidCount := m.RestartAppXidCount
+	generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+		MetricName:      aws.String(gpuMetricNameGPURestartAppXidCount),
+		MetricValueLong: &xidCount,
+		Unit:            aws.String(gpuMetricUnitCount),
+	})
+
+	return &ecstcs.GeneralMetricsWrapper{
+		Dimensions: []*ecstcs.Dimension{
+			{
+				Key:   aws.String(gpuDeviceDimensionKey),
+				Value: aws.String(m.GPUUUID),
+			},
+		},
+		GeneralMetrics: generalMetrics,
+	}
+}
+
+// gpuMetricsForContainer returns wrappers for the GPUs in metrics whose UUID is
+// in gpuDeviceIDs. Returns nil when either input is empty.
+func gpuMetricsForContainer(metrics []gputypes.GPUMetric, gpuDeviceIDs []string) []*ecstcs.GeneralMetricsWrapper {
+	if len(metrics) == 0 || len(gpuDeviceIDs) == 0 {
+		return nil
+	}
+
+	deviceIDSet := make(map[string]struct{}, len(gpuDeviceIDs))
+	for _, id := range gpuDeviceIDs {
+		deviceIDSet[id] = struct{}{}
+	}
+
+	var result []*ecstcs.GeneralMetricsWrapper
+	for _, m := range metrics {
+		if _, ok := deviceIDSet[m.GPUUUID]; !ok {
+			continue
+		}
+		if wrapper := gpuMetricToGeneralMetricsWrapper(m); wrapper != nil {
+			result = append(result, wrapper)
+		}
+	}
+	return result
+}
+
+// gpuMetricsToInstancePayload builds the dimensionless instance-level wrapper
+// carrying InstanceGPULimit (GPUs in the snapshot) and InstanceGPUUsageTotal.
+// The backend stamps the instance-scoping dimensions itself.
+func gpuMetricsToInstancePayload(metrics []gputypes.GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
+	if len(metrics) == 0 {
+		return nil
+	}
+
+	limitCount := int64(len(metrics))
+	return []*ecstcs.GeneralMetricsWrapper{
+		{
+			GeneralMetrics: []*ecstcs.GeneralMetric{
+				{
+					MetricName:      aws.String(gpuMetricNameInstanceGPULimitCount),
+					MetricValueLong: &limitCount,
+					Unit:            aws.String(gpuMetricUnitCount),
+				},
+				{
+					MetricName:      aws.String(gpuMetricNameInstanceGPUUsageTotal),
+					MetricValueLong: &usageTotal,
+					Unit:            aws.String(gpuMetricUnitCount),
+				},
+			},
+		},
+	}
 }
 
 func (engine *DockerStatsEngine) doRemoveContainerUnsafe(container *StatsContainer, taskArn string) {
