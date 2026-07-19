@@ -662,7 +662,7 @@ func testNetworkModeStatsInteg(t *testing.T, networkMode string, statsEmpty bool
 
 	// Wait for the stats collection go routine to start.
 	time.Sleep(checkPointSleep)
-	_, taskMetrics, _, err := engine.GetInstanceMetrics(false)
+	_, taskMetrics, _, err := engine.GetInstanceMetrics(false, false)
 	assert.NoError(t, err, "getting instance metrics failed")
 	taskMetric := taskMetrics[0]
 	for _, containerMetric := range taskMetric.ContainerMetrics {
@@ -759,7 +759,7 @@ func TestStorageStats(t *testing.T) {
 
 	// Wait for the stats collection go routine to start.
 	time.Sleep(checkPointSleep)
-	_, taskMetrics, _, err := engine.GetInstanceMetrics(false)
+	_, taskMetrics, _, err := engine.GetInstanceMetrics(false, false)
 	assert.NoError(t, err, "getting instance metrics failed")
 	taskMetric := taskMetrics[0]
 	for _, containerMetric := range taskMetric.ContainerMetrics {

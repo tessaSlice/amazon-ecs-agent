@@ -38,11 +38,14 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	agentgpu "github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
 	taskresourcevolume "github.com/aws/amazon-ecs-agent/agent/taskresource/volume"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/csiclient"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/eventstream"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/gpu"
+	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/stats"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 
@@ -58,6 +61,9 @@ const (
 	// defaultPublishServiceConnectTicker is every 3rd time service connect metrics will be sent to the backend
 	// Task metrics are published at 20s interval, thus task's service metrics will be published 60s.
 	defaultPublishServiceConnectTicker = 3
+	// defaultPublishGPUMetricsTicker is every 3rd time GPU metrics will be sent
+	// to the backend, matching dcgm-init's 60s write cadence.
+	defaultPublishGPUMetricsTicker = 3
 )
 
 var (
@@ -75,10 +81,19 @@ type DockerContainerMetadataResolver struct {
 	dockerTaskEngine *ecsengine.DockerTaskEngine
 }
 
+// gpuMetricsReader provides GPU metrics snapshots written by dcgm-init.
+type gpuMetricsReader interface {
+	GetGPUMetrics() *gputypes.GPUMetricsFileData
+}
+
+// The production reader must satisfy the seam on every platform (the !linux
+// reader variant is a no-op that always returns nil).
+var _ gpuMetricsReader = (*agentgpu.DCGMMetricsReader)(nil)
+
 // Engine defines methods to be implemented by the engine struct. It is
 // defined to make testing easier.
 type Engine interface {
-	GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error)
+	GetInstanceMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error)
 	ContainerDockerStats(taskARN string, containerID string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error)
 	GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error)
 	GetPublishServiceConnectTickerInterval() int32
@@ -108,7 +123,14 @@ type DockerStatsEngine struct {
 	taskToTaskStats                     map[string]*StatsTask
 	taskToServiceConnectStats           map[string]*ServiceConnectStats
 	publishServiceConnectTickerInterval int32
-	publishMetricsTicker                *time.Ticker
+	publishGPUMetricsTickerInterval     int32
+	// gpuReader supplies dcgm-init's GPU metrics snapshots; nil when unset.
+	gpuReader gpuMetricsReader
+	// lastEmittedGPUTimestamp is the reader Timestamp of the last emitted GPU
+	// snapshot; an unchanged value on a later emitting tick means the data is
+	// stale and must not be re-emitted.
+	lastEmittedGPUTimestamp string
+	publishMetricsTicker    *time.Ticker
 	// channels to send metrics to TACS Client
 	metricsChannel chan<- ecstcs.TelemetryMessage
 	healthChannel  chan<- ecstcs.HealthMessage
@@ -158,6 +180,10 @@ func (resolver *DockerContainerMetadataResolver) ResolveContainer(dockerID strin
 // NewDockerStatsEngine creates a new instance of the DockerStatsEngine object.
 // MustInit() must be called to initialize the fields of the new event listener.
 func NewDockerStatsEngine(cfg *config.Config, client dockerapi.DockerClient, containerChangeEventStream *eventstream.EventStream, metricsChannel chan<- ecstcs.TelemetryMessage, healthChannel chan<- ecstcs.HealthMessage, dataClient data.Client) *DockerStatsEngine {
+	var reader gpuMetricsReader
+	if cfg.GPUSupportEnabled {
+		reader = agentgpu.NewDCGMMetricsReader("")
+	}
 	return &DockerStatsEngine{
 		client:                              client,
 		resolver:                            nil,
@@ -169,6 +195,7 @@ func NewDockerStatsEngine(cfg *config.Config, client dockerapi.DockerClient, con
 		taskToServiceConnectStats:           make(map[string]*ServiceConnectStats),
 		containerChangeEventStream:          containerChangeEventStream,
 		publishServiceConnectTickerInterval: 0,
+		gpuReader:                           reader,
 		metricsChannel:                      metricsChannel,
 		healthChannel:                       healthChannel,
 		dataClient:                          dataClient,
@@ -449,25 +476,36 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 
 	// Publish metrics immediately after we start the loop and wait for ticks. This makes sure TACS side has correct
 	// TaskCount metrics in CX account (especially for short living tasks)
-	engine.publishMetrics(false)
+	engine.publishMetrics(false, false)
 	engine.publishHealth()
 
 	for {
 		var includeServiceConnectStats bool
-		metricCounter := engine.GetPublishServiceConnectTickerInterval()
-		metricCounter++
-		if metricCounter == defaultPublishServiceConnectTicker {
+		serviceConnectCounter := engine.GetPublishServiceConnectTickerInterval()
+		serviceConnectCounter++
+		if serviceConnectCounter == defaultPublishServiceConnectTicker {
 			includeServiceConnectStats = true
-			metricCounter = 0
+			serviceConnectCounter = 0
 		}
-		engine.SetPublishServiceConnectTickerInterval(metricCounter)
+		engine.SetPublishServiceConnectTickerInterval(serviceConnectCounter)
+		var includeGPUMetrics bool
+		gpuMetricCounter := engine.GetPublishGPUMetricsTickerInterval()
+		gpuMetricCounter++
+		if gpuMetricCounter == defaultPublishGPUMetricsTicker {
+			includeGPUMetrics = true
+			gpuMetricCounter = 0
+		}
+		engine.SetPublishGPUMetricsTickerInterval(gpuMetricCounter)
 		select {
 		case <-engine.publishMetricsTicker.C:
 			seelog.Debugf("publishMetricsTicker triggered. Sending telemetry messages to tcsClient through channel")
 			if includeServiceConnectStats {
 				seelog.Debugf("service connect metrics included")
 			}
-			go engine.publishMetrics(includeServiceConnectStats)
+			if includeGPUMetrics {
+				seelog.Debugf("GPU metrics included")
+			}
+			go engine.publishMetrics(includeServiceConnectStats, includeGPUMetrics)
 			go engine.publishHealth()
 		case <-engine.ctx.Done():
 			return
@@ -475,11 +513,10 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 	}
 }
 
-func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool) {
-	// TODO: publish task level GPU metrics here
+func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) {
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
-	metricsMetadata, taskMetrics, instanceMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats)
+	metricsMetadata, taskMetrics, instanceMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats, includeGPUMetrics)
 	if metricsErr == nil {
 		metricsMessage := ecstcs.TelemetryMessage{
 			InstanceMetrics: instanceMetrics,
@@ -518,8 +555,7 @@ func (engine *DockerStatsEngine) publishHealth() {
 }
 
 // GetInstanceMetrics gets all task metrics and instance metadata from stats engine.
-func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
-	// TODO: publish instance level GPU metrics here
+func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
 	var instanceMetrics *ecstcs.InstanceMetrics
 	idle := engine.isIdle()
 	metricsMetadata := &ecstcs.MetricsMetadata{
@@ -537,6 +573,11 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 		return metricsMetadata, taskMetrics, instanceMetrics, nil
 	}
 
+	// Read the GPU snapshot after the idle check but before engine.lock
+	// (file I/O). Mirrors SC's getServiceConnectStats placement: no work
+	// is done on idle instances.
+	gpuMetrics, gpuTimestamp := engine.snapshotGPUMetrics(includeGPUMetrics)
+
 	engine.lock.Lock()
 	defer engine.lock.Unlock()
 
@@ -550,7 +591,7 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 	taskStatsToCollect := engine.getTaskStatsToCollect()
 	for taskArn := range taskStatsToCollect {
 		_, isServiceConnectTask := engine.taskToServiceConnectStats[taskArn]
-		containerMetrics, err := engine.taskContainerMetricsUnsafe(taskArn)
+		containerMetrics, err := engine.taskContainerMetricsUnsafe(taskArn, gpuMetrics)
 		if err != nil {
 			seelog.Debugf("Error getting container metrics for task: %s, err: %v", taskArn, err)
 			// skip collecting service connect related metrics, if task is not service connect enabled.
@@ -604,6 +645,16 @@ func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats b
 		// Not idle. Expect taskMetrics to be there.
 		seelog.Debugf("Return empty metrics error")
 		return nil, nil, nil, EmptyMetricsError
+	}
+
+	if len(gpuMetrics) > 0 {
+		if payload := gpu.GPUMetricsToInstancePayload(gpuMetrics, engine.computeGPUUsageTotalUnsafe()); payload != nil {
+			instanceMetrics = &ecstcs.InstanceMetrics{GeneralMetricsPayload: payload}
+		}
+		// Commit only now that the metrics are attached to the returned
+		// message; earlier returns (idle, EmptyMetricsError) leave the
+		// cursor unset so the snapshot is retried on the next emitting tick.
+		engine.commitGPUTimestampUnsafe(gpuTimestamp)
 	}
 
 	engine.resetStatsUnsafe()
@@ -816,7 +867,7 @@ func newDockerContainerMetadataResolver(taskEngine ecsengine.TaskEngine) (*Docke
 // taskContainerMetricsUnsafe gets all container metrics for a task arn.
 //
 //gocyclo:ignore
-func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*ecstcs.ContainerMetric, error) {
+func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string, gpuMetrics []gputypes.GPUMetric) ([]*ecstcs.ContainerMetric, error) {
 	containerMap, taskExists := engine.tasksToContainers[taskArn]
 	if !taskExists {
 		return nil, fmt.Errorf("task not found")
@@ -868,6 +919,14 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string) ([]*
 			ContainerName:  &container.containerMetadata.Name,
 			CpuStatsSet:    cpuStatsSet,
 			MemoryStatsSet: memoryStatsSet,
+		}
+
+		if len(gpuMetrics) > 0 {
+			// Resolve independently of the network-stats resolve below, which
+			// is nested in network-mode branches and skips host/none modes.
+			if dockerContainer, err := engine.resolver.ResolveContainer(dockerID); err == nil {
+				containerMetric.GeneralMetricsPayload = gpu.GPUMetricsForContainer(gpuMetrics, dockerContainer.Container.GPUIDs)
+			}
 		}
 
 		storageStatsSet, err := container.statsQueue.GetStorageStatsSet()
@@ -1090,6 +1149,85 @@ func (engine *DockerStatsEngine) SetPublishServiceConnectTickerInterval(publishS
 
 func (engine *DockerStatsEngine) GetPublishMetricsTicker() *time.Ticker {
 	return engine.publishMetricsTicker
+}
+
+// SetGPUMetricsReader injects the reader supplying dcgm-init GPU snapshots.
+func (engine *DockerStatsEngine) SetGPUMetricsReader(reader gpuMetricsReader) {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	engine.gpuReader = reader
+}
+
+func (engine *DockerStatsEngine) GetPublishGPUMetricsTickerInterval() int32 {
+	engine.lock.RLock()
+	defer engine.lock.RUnlock()
+
+	return engine.publishGPUMetricsTickerInterval
+}
+
+func (engine *DockerStatsEngine) SetPublishGPUMetricsTickerInterval(counter int32) {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	engine.publishGPUMetricsTickerInterval = counter
+}
+
+// snapshotGPUMetrics returns the reader's GPU readings and snapshot timestamp
+// when includeGPUMetrics is set (the StartMetricsPublish loop raises it every
+// defaultPublishGPUMetricsTicker-th tick, mirroring Service Connect) and the
+// snapshot is fresh (timestamp changed since the last emission). It returns
+// nil otherwise: flag unset, no reader, no data, or stale snapshot. It does
+// NOT commit the staleness cursor — the caller commits via
+// commitGPUTimestampUnsafe only once the metrics are actually attached, so a
+// snapshot consumed by an idle or empty-metrics return is retried on the next
+// GPU tick. Callers must NOT hold engine.lock: the reader performs file I/O.
+func (engine *DockerStatsEngine) snapshotGPUMetrics(includeGPUMetrics bool) ([]gputypes.GPUMetric, string) {
+	if !includeGPUMetrics {
+		return nil, ""
+	}
+
+	engine.lock.RLock()
+	reader := engine.gpuReader
+	lastEmitted := engine.lastEmittedGPUTimestamp
+	engine.lock.RUnlock()
+
+	if reader == nil {
+		return nil, ""
+	}
+	data := reader.GetGPUMetrics()
+	if data == nil || len(data.GPUs) == 0 {
+		return nil, ""
+	}
+	if data.Timestamp == lastEmitted {
+		// dcgm-init has not written a new snapshot since the last emission.
+		return nil, ""
+	}
+	return data.GPUs, data.Timestamp
+}
+
+// commitGPUTimestampUnsafe records the timestamp of an emitted GPU snapshot
+// so later ticks can detect staleness. Caller must hold engine.lock.
+func (engine *DockerStatsEngine) commitGPUTimestampUnsafe(timestamp string) {
+	engine.lastEmittedGPUTimestamp = timestamp
+}
+
+// computeGPUUsageTotalUnsafe counts the unique GPU IDs assigned to watched
+// task containers. Caller must hold engine.lock.
+func (engine *DockerStatsEngine) computeGPUUsageTotalUnsafe() int64 {
+	assigned := make(map[string]struct{})
+	for taskArn := range engine.tasksToContainers {
+		for dockerID := range engine.tasksToContainers[taskArn] {
+			dockerContainer, err := engine.resolver.ResolveContainer(dockerID)
+			if err != nil {
+				continue
+			}
+			for _, id := range dockerContainer.Container.GPUIDs {
+				assigned[id] = struct{}{}
+			}
+		}
+	}
+	return int64(len(assigned))
 }
 
 func (engine *DockerStatsEngine) getEBSVolumeMetrics(taskArn string) []*ecstcs.VolumeMetric {

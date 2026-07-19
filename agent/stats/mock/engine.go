@@ -68,9 +68,9 @@ func (mr *MockEngineMockRecorder) ContainerDockerStats(arg0, arg1 interface{}) *
 }
 
 // GetInstanceMetrics mocks base method.
-func (m *MockEngine) GetInstanceMetrics(arg0 bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
+func (m *MockEngine) GetInstanceMetrics(arg0, arg1 bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetInstanceMetrics", arg0)
+	ret := m.ctrl.Call(m, "GetInstanceMetrics", arg0, arg1)
 	ret0, _ := ret[0].(*ecstcs.MetricsMetadata)
 	ret1, _ := ret[1].([]*ecstcs.TaskMetric)
 	ret2, _ := ret[2].(*ecstcs.InstanceMetrics)
@@ -79,9 +79,9 @@ func (m *MockEngine) GetInstanceMetrics(arg0 bool) (*ecstcs.MetricsMetadata, []*
 }
 
 // GetInstanceMetrics indicates an expected call of GetInstanceMetrics.
-func (mr *MockEngineMockRecorder) GetInstanceMetrics(arg0 interface{}) *gomock.Call {
+func (mr *MockEngineMockRecorder) GetInstanceMetrics(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetInstanceMetrics", reflect.TypeOf((*MockEngine)(nil).GetInstanceMetrics), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetInstanceMetrics", reflect.TypeOf((*MockEngine)(nil).GetInstanceMetrics), arg0, arg1)
 }
 
 // GetPublishMetricsTicker mocks base method.

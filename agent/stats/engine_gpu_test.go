@@ -24,8 +24,8 @@ package stats
 //     *gputypes.GPUMetricsFileData }, injected via SetGPUMetricsReader
 //     (satisfied by agent/gpu.DCGMMetricsReader).
 //  2. A 3-tick cadence gate (defaultPublishGPUMetricsTicker = 3,
-//     Get/SetPublishGPUMetricsTickerInterval): the counter advances per
-//     GetInstanceMetrics call; GPU emission is attempted only when it hits
+//     Get/SetPublishGPUMetricsTickerInterval): the counter advances in StartMetricsPublish (like SC) and
+//     includeGPUMetrics=true is passed to GetInstanceMetrics only when it hits
 //     the limit, at both scopes.
 //  3. Staleness suppression: an unchanged reader Timestamp on an emitting
 //     tick means no new dcgm-init snapshot — suppress GPU emission at both
@@ -110,11 +110,6 @@ func feedFakeStats(engine *DockerStatsEngine) {
 			}
 		}
 	}
-}
-
-// primeGPUTicker makes the next GetInstanceMetrics call an emitting tick.
-func primeGPUTicker(engine *DockerStatsEngine) {
-	engine.SetPublishGPUMetricsTickerInterval(defaultPublishGPUMetricsTicker - 1)
 }
 
 // requireInstanceGPUPayload asserts the instance-level GPU contract: exactly
@@ -231,10 +226,9 @@ func TestGetInstanceMetricsEmitsInstanceGPUMetrics(t *testing.T) {
 	}}
 	engine.SetGPUMetricsReader(fake)
 
-	primeGPUTicker(engine)
 	feedFakeStats(engine)
 
-	metadata, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false)
+	metadata, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false, true)
 	require.NoError(t, err)
 	require.NotNil(t, metadata)
 	require.Len(t, taskMetrics, 1)
@@ -275,9 +269,8 @@ func TestGetInstanceMetricsSkipsStaleGPUMetrics(t *testing.T) {
 	engine.SetGPUMetricsReader(fake)
 
 	// Emitting tick #1: fresh data -> emitted at both scopes.
-	primeGPUTicker(engine)
 	feedFakeStats(engine)
-	_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false)
+	_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false, true)
 	require.NoError(t, err)
 	requireInstanceGPUPayload(t, instanceMetrics, 1, 1)
 	require.Len(t, taskMetrics, 1)
@@ -286,18 +279,16 @@ func TestGetInstanceMetricsSkipsStaleGPUMetrics(t *testing.T) {
 
 	// Emitting tick #2: same timestamp -> stale. Both scopes suppressed
 	// (tick #1's GPU-1 wrapper must not reappear); CPU/memory keep flowing.
-	primeGPUTicker(engine)
 	feedFakeStats(engine)
-	_, taskMetrics, instanceMetrics, err = engine.GetInstanceMetrics(false)
+	_, taskMetrics, instanceMetrics, err = engine.GetInstanceMetrics(false, true)
 	require.NoError(t, err)
 	assert.Nil(t, instanceMetrics, "stale GPU data (unchanged timestamp) must not be re-emitted")
 	requireNoContainerGPUPayload(t, taskMetrics)
 
 	// Emitting tick #3: new snapshot -> emission resumes at both scopes.
 	fake.data.Timestamp = "2026-07-19T00:01:00Z"
-	primeGPUTicker(engine)
 	feedFakeStats(engine)
-	_, taskMetrics, instanceMetrics, err = engine.GetInstanceMetrics(false)
+	_, taskMetrics, instanceMetrics, err = engine.GetInstanceMetrics(false, true)
 	require.NoError(t, err)
 	requireInstanceGPUPayload(t, instanceMetrics, 1, 1)
 	require.Len(t, taskMetrics, 1)
@@ -305,10 +296,10 @@ func TestGetInstanceMetricsSkipsStaleGPUMetrics(t *testing.T) {
 	requireContainerGPUPayload(t, taskMetrics[0].ContainerMetrics[0], []string{"GPU-1"})
 }
 
-// TestGPUMetricsEmittedEveryThirdPublish verifies the cadence gate: both GPU
-// scopes ride only every 3rd publish (mirroring Service Connect's ticker)
-// regardless of data freshness; CPU/memory metrics flow on every tick.
-func TestGPUMetricsEmittedEveryThirdPublish(t *testing.T) {
+// TestGPUMetricsEmittedOnlyWhenFlagSet verifies that GPU payloads are
+// attached only when includeGPUMetrics is true (set by StartMetricsPublish
+// every 3rd tick); CPU/memory metrics flow regardless.
+func TestGPUMetricsEmittedOnlyWhenFlagSet(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 
@@ -322,25 +313,24 @@ func TestGPUMetricsEmittedEveryThirdPublish(t *testing.T) {
 	}}
 	engine.SetGPUMetricsReader(fake)
 
-	require.EqualValues(t, 0, engine.GetPublishGPUMetricsTickerInterval(),
-		"fresh engine must start with a zeroed GPU cadence counter")
-
 	for tick := 1; tick <= 2*defaultPublishGPUMetricsTicker; tick++ {
 		// Fresh data every round so staleness never interferes.
 		fake.data.Timestamp = fmt.Sprintf("2026-07-19T00:00:%02dZ", tick)
 		feedFakeStats(engine)
 
-		_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false)
+		// Simulate StartMetricsPublish: pass true on every 3rd tick.
+		includeGPU := tick%defaultPublishGPUMetricsTicker == 0
+		_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false, includeGPU)
 		require.NoError(t, err, "tick %d", tick)
 
-		if tick%defaultPublishGPUMetricsTicker == 0 {
+		if includeGPU {
 			requireInstanceGPUPayload(t, instanceMetrics, 1, 1)
 			require.Len(t, taskMetrics, 1, "tick %d", tick)
 			require.Len(t, taskMetrics[0].ContainerMetrics, 1, "tick %d", tick)
 			requireContainerGPUPayload(t, taskMetrics[0].ContainerMetrics[0], []string{"GPU-1"})
 		} else {
-			assert.Nil(t, instanceMetrics, "instance GPU metrics must not be emitted on tick %d (only every %d ticks)",
-				tick, defaultPublishGPUMetricsTicker)
+			assert.Nil(t, instanceMetrics, "GPU metrics must not be emitted when includeGPUMetrics=false (tick %d)",
+				tick)
 			requireNoContainerGPUPayload(t, taskMetrics)
 		}
 	}
@@ -368,10 +358,9 @@ func TestGetInstanceMetricsContainerGPUMetricsFiltering(t *testing.T) {
 	}}
 	engine.SetGPUMetricsReader(fake)
 
-	primeGPUTicker(engine)
 	feedFakeStats(engine)
 
-	_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false)
+	_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false, true)
 	require.NoError(t, err)
 	require.Len(t, taskMetrics, 1)
 	require.Len(t, taskMetrics[0].ContainerMetrics, 1)
@@ -409,10 +398,9 @@ func TestGetInstanceMetricsNoContainerGPUPayloadWithoutAssignment(t *testing.T) 
 	}}
 	engine.SetGPUMetricsReader(fake)
 
-	primeGPUTicker(engine)
 	feedFakeStats(engine)
 
-	_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false)
+	_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false, true)
 	require.NoError(t, err)
 
 	// Instance scope still emits: the host has a GPU, none assigned.
