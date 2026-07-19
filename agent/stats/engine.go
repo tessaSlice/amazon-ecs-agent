@@ -517,9 +517,7 @@ func (engine *DockerStatsEngine) publishHealth() {
 	}
 }
 
-// GetInstanceMetrics gets all task metrics, instance metrics, and instance
-// metadata from stats engine. The returned *ecstcs.InstanceMetrics is nil until
-// a producer populates it.
+// GetInstanceMetrics gets all task metrics and instance metadata from stats engine.
 func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
 	// TODO: publish instance level GPU metrics here
 	var instanceMetrics *ecstcs.InstanceMetrics
