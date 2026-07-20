@@ -62,11 +62,16 @@ func TestGpuMetricToGeneralMetricsWrapper(t *testing.T) {
 			expectedIsDoubles: []bool{true, true, false, false, true, true, false},
 		},
 		{
-			name: "all fields nil",
+			name: "all telemetry nil still emits XID count",
 			metric: gputypes.GPUMetric{
 				GPUUUID: "GPU-nil-all",
 			},
-			expectNil: true,
+			expectNil:         false,
+			expectedCount:     1,
+			expectedDimValue:  "GPU-nil-all",
+			expectedNames:     []string{"GPURestartAppXidCount"},
+			expectedUnits:     []string{"Count"},
+			expectedIsDoubles: []bool{false},
 		},
 		{
 			name: "only GPUUtilization set",
@@ -385,12 +390,13 @@ func TestGpuMetricsForContainer(t *testing.T) {
 			expectedUUIDs: []string{"GPU-2"},
 		},
 		{
-			name: "matching UUID but all nil fields returns nil",
+			name:    "matching UUID but all nil telemetry fields still emits XID count",
 			metrics: []gputypes.GPUMetric{
-				{GPUUUID: "GPU-1"}, // all nil fields
+				{GPUUUID: "GPU-1"}, // all nil telemetry fields, but XID count (0) is always included
 			},
-			deviceIDs: []string{"GPU-1"},
-			expectNil: true,
+			deviceIDs:     []string{"GPU-1"},
+			expectNil:     false,
+			expectedUUIDs: []string{"GPU-1"},
 		},
 		{
 			name: "all UUIDs match",

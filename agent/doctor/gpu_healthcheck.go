@@ -30,6 +30,12 @@ import (
 // ConditionPathExists can skip dcgm-init entirely on non-GPU hosts.
 const gpuBootGracePeriod = 90 * time.Second
 
+// gpuStalenessThreshold is the maximum age of a GPU metrics snapshot before the
+// healthcheck considers it stale and reports INSUFFICIENT_DATA. This prevents a
+// dead dcgm-init process from leaving a perpetually stale OK/IMPAIRED verdict.
+// Set to 3x the producer's 60-second tick to allow for transient write delays.
+const gpuStalenessThreshold = 180 * time.Second
+
 // gpuHealthcheck implements the ACCELERATED_COMPUTE instance health check. It
 // reads the shared GPU metrics file written by dcgm-init and derives a verdict.
 type gpuHealthcheck struct {
@@ -59,12 +65,10 @@ func (ghc *gpuHealthcheck) GetHealthcheckType() string {
 // Decision order (first match wins):
 //  1. File unreadable/missing/corrupt (reader returns nil) → INSUFFICIENT_DATA
 //     (with a 90s boot grace while still INITIALIZING).
-//  2. ConnectionLost == true → INSUFFICIENT_DATA (health unknown).
-//  3. Healthy == true → OK.
-//  4. Healthy == false → IMPAIRED.
-//
-// This health check does not evaluate timestamp staleness. GPU metric emission
-// de-duplicates only the exact timestamp most recently reported to TACS.
+//  2. Timestamp stale (older than gpuStalenessThreshold) → INSUFFICIENT_DATA.
+//  3. ConnectionLost == true → INSUFFICIENT_DATA (health unknown).
+//  4. Healthy == true → OK.
+//  5. Healthy == false → IMPAIRED.
 func (ghc *gpuHealthcheck) RunCheck() ecstcs.InstanceHealthCheckStatus {
 	healthStatus := ghc.reader.GetGPUMetrics()
 	if healthStatus == nil {
@@ -76,6 +80,16 @@ func (ghc *gpuHealthcheck) RunCheck() ecstcs.InstanceHealthCheckStatus {
 		seelog.Debug("[GPUHealthcheck] GPU health status not available")
 		ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
 		return ecstcs.InstanceHealthCheckStatusInsufficientData
+	}
+
+	// Detect a dead producer: if the timestamp is older than the staleness threshold,
+	// the file is outdated and the verdict is unreliable.
+	if ts, err := time.Parse(time.RFC3339, healthStatus.Timestamp); err == nil {
+		if timeNow().Sub(ts) > gpuStalenessThreshold {
+			seelog.Infof("[GPUHealthcheck] GPU metrics file is stale (age %v > %v)", timeNow().Sub(ts), gpuStalenessThreshold)
+			ghc.SetHealthcheckStatus(ecstcs.InstanceHealthCheckStatusInsufficientData)
+			return ecstcs.InstanceHealthCheckStatusInsufficientData
+		}
 	}
 
 	if healthStatus.ConnectionLost {

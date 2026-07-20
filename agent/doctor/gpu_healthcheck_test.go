@@ -31,8 +31,9 @@ func TestGPUHealthcheckReportsOkWhenHealthy(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
+	freshTS := time.Now().UTC().Format(time.RFC3339)
 	err := os.WriteFile(filePath, []byte(`{
-		"timestamp": "2026-01-01T00:00:00Z",
+		"timestamp": "`+freshTS+`",
 		"healthy": true,
 		"gpus": [{"gpu_uuid": "GPU-001"}]
 	}`), 0644)
@@ -50,8 +51,9 @@ func TestGPUHealthcheckReportsImpairedWhenUnhealthy(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
+	freshTS := time.Now().UTC().Format(time.RFC3339)
 	err := os.WriteFile(filePath, []byte(`{
-		"timestamp": "2026-01-01T00:00:00Z",
+		"timestamp": "`+freshTS+`",
 		"healthy": false,
 		"unhealthy_reason": "XID_48",
 		"gpus": [{"gpu_uuid": "GPU-001"}]
@@ -176,25 +178,24 @@ func TestGPUHealthcheckReportsInsufficientDataWhenConnectionLost(t *testing.T) {
 // Timestamp age and direction do not affect GPU health. The reader validates
 // timestamp syntax, while RunCheck derives status only from data availability,
 // connection_lost, and healthy.
-func TestGPUHealthcheckDoesNotEvaluateTimestampStaleness(t *testing.T) {
-	testCases := []struct {
-		name      string
-		timestamp string
-	}{
-		{name: "arbitrarily old timestamp", timestamp: "2000-01-01T00:00:00Z"},
-		{name: "far-future timestamp", timestamp: "2099-01-01T00:00:00Z"},
-	}
+func TestGPUHealthcheckTimestampStaleness(t *testing.T) {
+	t.Run("stale timestamp reports INSUFFICIENT_DATA", func(t *testing.T) {
+		filePath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+		contents := `{"timestamp":"2000-01-01T00:00:00Z","healthy":true,"gpus":[]}`
+		require.NoError(t, os.WriteFile(filePath, []byte(contents), 0644))
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			filePath := filepath.Join(t.TempDir(), "gpu-metrics.json")
-			contents := `{"timestamp":"` + tc.timestamp + `","healthy":true,"gpus":[]}`
-			require.NoError(t, os.WriteFile(filePath, []byte(contents), 0644))
+		hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader(filePath))
+		assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.RunCheck())
+	})
 
-			hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader(filePath))
-			assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, hc.RunCheck())
-		})
-	}
+	t.Run("future timestamp is not stale and reports OK", func(t *testing.T) {
+		filePath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+		contents := `{"timestamp":"2099-01-01T00:00:00Z","healthy":true,"gpus":[]}`
+		require.NoError(t, os.WriteFile(filePath, []byte(contents), 0644))
+
+		hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader(filePath))
+		assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, hc.RunCheck())
+	})
 }
 
 // CASE 3 — connectionlost-with-unhealthy-ordering: when both connection_lost=true
@@ -203,6 +204,12 @@ func TestGPUHealthcheckDoesNotEvaluateTimestampStaleness(t *testing.T) {
 // RunCheck returns INSUFFICIENT_DATA, not IMPAIRED. This locks connection-lost
 // precedence over an unhealthy report.
 func TestGPUHealthcheckConnectionLostBeatsUnhealthy(t *testing.T) {
+	// Anchor timeNow near the file's timestamp so it is not stale.
+	base := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
+	original := timeNow
+	timeNow = func() time.Time { return base }
+	defer func() { timeNow = original }()
+
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
@@ -224,6 +231,13 @@ func TestGPUHealthcheckConnectionLostBeatsUnhealthy(t *testing.T) {
 }
 
 func TestGPUHealthcheckStatusTransition(t *testing.T) {
+	// Anchor timeNow to a fixed point so the file timestamps are within
+	// the staleness threshold.
+	base := time.Date(2026, 1, 1, 0, 1, 30, 0, time.UTC)
+	original := timeNow
+	timeNow = func() time.Time { return base }
+	defer func() { timeNow = original }()
+
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
 
