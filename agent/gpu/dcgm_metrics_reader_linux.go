@@ -58,7 +58,7 @@ func (r *DCGMMetricsReader) GetGPUMetrics() *gputypes.GPUMetricsFileData {
 		return nil
 	}
 
-	if _, err := time.Parse(time.RFC3339, fileData.Timestamp); err != nil {
+	if _, err := time.Parse(gputypes.TimestampFormat, fileData.Timestamp); err != nil {
 		logger.Warn("Failed to parse GPU metrics timestamp", logger.Fields{field.Error: err})
 		return nil
 	}

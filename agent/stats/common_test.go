@@ -424,6 +424,6 @@ type fakeGPUReader struct {
 func (f *fakeGPUReader) GetGPUMetrics() *gputypes.GPUMetricsFileData {
 	f.readCount++
 	ts := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC).Add(time.Duration(f.readCount) * time.Second)
-	f.data.Timestamp = ts.Format(time.RFC3339)
+	f.data.Timestamp = ts.Format(gputypes.TimestampFormat)
 	return f.data
 }

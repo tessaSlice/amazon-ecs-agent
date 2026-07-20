@@ -175,7 +175,7 @@ func TestDCGMMetricsReaderMultipleGPUs(t *testing.T) {
 	}
 
 	data := gputypes.GPUMetricsFileData{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Timestamp: time.Now().UTC().Format(gputypes.TimestampFormat),
 		GPUs:      expectedGPUs,
 	}
 
@@ -413,7 +413,7 @@ func TestDCGMMetricsReaderDirPathNotADirectory(t *testing.T) {
 }
 
 // TestDCGMMetricsReaderInvalidTimestamp covers the timestamp-validation branch: valid
-// JSON but a timestamp that is not RFC3339 is rejected as corrupt.
+// JSON but a timestamp that doesn't match TimestampFormat is rejected as corrupt.
 func TestDCGMMetricsReaderInvalidTimestamp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")

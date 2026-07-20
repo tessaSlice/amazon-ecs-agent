@@ -119,9 +119,9 @@ type DockerStatsEngine struct {
 	taskToServiceConnectStats           map[string]*ServiceConnectStats
 	publishServiceConnectTickerInterval int32
 	publishGPUMetricsTickerInterval int32
-	gpuReader                       gpuMetricsReader
-	lastEmittedGPUTimestamp         time.Time
-	publishMetricsTicker            *time.Ticker
+	gpuReader                   gpuMetricsReader
+	lastEmittedGPUTimestamp     string
+	publishMetricsTicker        *time.Ticker
 	// channels to send metrics to TACS Client
 	metricsChannel chan<- ecstcs.TelemetryMessage
 	healthChannel  chan<- ecstcs.HealthMessage
@@ -1164,9 +1164,9 @@ func (engine *DockerStatsEngine) SetPublishGPUMetricsTickerInterval(counter int3
 // or the connection is lost. Does not commit the staleness cursor; the caller
 // commits only after metrics are actually attached.
 // Callers must NOT hold engine.lock (reader performs file I/O).
-func (engine *DockerStatsEngine) snapshotGPUMetrics(includeGPUMetrics bool) ([]gputypes.GPUMetric, time.Time) {
+func (engine *DockerStatsEngine) snapshotGPUMetrics(includeGPUMetrics bool) ([]gputypes.GPUMetric, string) {
 	if !includeGPUMetrics {
-		return nil, time.Time{}
+		return nil, ""
 	}
 
 	engine.lock.RLock()
@@ -1175,23 +1175,22 @@ func (engine *DockerStatsEngine) snapshotGPUMetrics(includeGPUMetrics bool) ([]g
 	engine.lock.RUnlock()
 
 	if reader == nil {
-		return nil, time.Time{}
+		return nil, ""
 	}
 	data := reader.GetGPUMetrics()
 	if data == nil || len(data.GPUs) == 0 || data.ConnectionLost {
-		return nil, time.Time{}
+		return nil, ""
 	}
-	ts, err := time.Parse(time.RFC3339, data.Timestamp)
-	if err != nil || !ts.After(lastEmitted) {
-		return nil, time.Time{}
+	if data.Timestamp <= lastEmitted {
+		return nil, ""
 	}
-	return data.GPUs, ts
+	return data.GPUs, data.Timestamp
 }
 
 // attemptCommitGPUTimestampUnsafe advances the staleness cursor if timestamp is
 // newer. Caller must hold engine.lock.
-func (engine *DockerStatsEngine) attemptCommitGPUTimestampUnsafe(timestamp time.Time) bool {
-	if !timestamp.After(engine.lastEmittedGPUTimestamp) {
+func (engine *DockerStatsEngine) attemptCommitGPUTimestampUnsafe(timestamp string) bool {
+	if engine.lastEmittedGPUTimestamp >= timestamp {
 		return false
 	}
 	engine.lastEmittedGPUTimestamp = timestamp

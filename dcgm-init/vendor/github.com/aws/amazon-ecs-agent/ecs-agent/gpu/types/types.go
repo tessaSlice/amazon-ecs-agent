@@ -17,10 +17,13 @@ const (
 	GPUMetricsDirPath  = "/var/run/ecs/gpu"
 	GPUMetricsFileName = "gpu-metrics.json"
 	GPUMetricsFilePath = GPUMetricsDirPath + "/" + GPUMetricsFileName
+
+	// TimestampFormat is a fixed UTC layout with a literal Z. Unlike
+	// time.RFC3339, this format cannot produce timezone offsets.
+	TimestampFormat = "2006-01-02T15:04:05Z"
 )
 
-// GPUMetric holds per-device GPU telemetry. This struct is used by both
-// dcgm-init (for collection) and the agent (for TACS conversion).
+// GPUMetric holds per-device GPU telemetry shared between dcgm-init and agent.
 type GPUMetric struct {
 	GPUUUID            string   `json:"gpu_uuid"`
 	GPUUtilization     *float64 `json:"gpu_utilization_percent,omitempty"`
@@ -32,15 +35,11 @@ type GPUMetric struct {
 	RestartAppXidCount int64    `json:"restart_app_xid_count"`
 }
 
-// GPUMetricsFileData is the JSON structure dcgm-init writes to the shared
-// metrics file and the agent reads. Callers use the timestamp to detect stale data.
+// GPUMetricsFileData is the JSON file format exchanged between dcgm-init and agent.
 type GPUMetricsFileData struct {
-	Timestamp       string `json:"timestamp"`
-	Healthy         bool   `json:"healthy"`
-	UnhealthyReason string `json:"unhealthy_reason,omitempty"`
-	// ConnectionLost means dcgm-init lost its DCGM connection (past the grace
-	// period). Healthy stays true while disconnected, so callers must treat this
-	// as unknown (INSUFFICIENT_DATA), not OK.
-	ConnectionLost bool        `json:"connection_lost,omitempty"`
-	GPUs           []GPUMetric `json:"gpus"`
+	Timestamp       string      `json:"timestamp"`
+	Healthy         bool        `json:"healthy"`
+	UnhealthyReason string      `json:"unhealthy_reason,omitempty"`
+	ConnectionLost  bool        `json:"connection_lost,omitempty"`
+	GPUs            []GPUMetric `json:"gpus"`
 }

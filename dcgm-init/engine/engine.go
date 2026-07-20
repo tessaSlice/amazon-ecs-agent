@@ -122,7 +122,7 @@ func (e *Engine) reconcileAndCollect(ctx context.Context) error {
 	}
 
 	output := gputypes.GPUMetricsFileData{
-		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		Timestamp:       time.Now().UTC().Format(gputypes.TimestampFormat),
 		Healthy:         e.client.IsHealthy(),
 		UnhealthyReason: e.client.UnhealthyReason(),
 		ConnectionLost:  e.client.IsConnectionLost(),

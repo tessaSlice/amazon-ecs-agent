@@ -17,6 +17,10 @@ const (
 	GPUMetricsDirPath  = "/var/run/ecs/gpu"
 	GPUMetricsFileName = "gpu-metrics.json"
 	GPUMetricsFilePath = GPUMetricsDirPath + "/" + GPUMetricsFileName
+
+	// TimestampFormat is a fixed UTC layout with a literal Z. Unlike
+	// time.RFC3339, this format cannot produce timezone offsets.
+	TimestampFormat = "2006-01-02T15:04:05Z"
 )
 
 // GPUMetric holds per-device GPU telemetry shared between dcgm-init and agent.
