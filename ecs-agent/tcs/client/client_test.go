@@ -40,6 +40,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -361,6 +362,83 @@ func (*nonIdleInstanceMetricsStatsSource) GetPublishMetricsTicker() *time.Ticker
 
 func newNonIdleInstanceMetricsStatsSource(numTasks int) *nonIdleInstanceMetricsStatsSource {
 	return &nonIdleInstanceMetricsStatsSource{numTasks: numTasks}
+}
+
+func buildInstanceGPUMetrics(limit, usage int64) *ecstcs.InstanceMetrics {
+	return &ecstcs.InstanceMetrics{
+		GeneralMetricsPayload: []*ecstcs.GeneralMetricsWrapper{
+			{
+				GeneralMetrics: []*ecstcs.GeneralMetric{
+					{
+						MetricName:      aws.String("InstanceGPULimit"),
+						MetricValueLong: aws.Int64(limit),
+						Unit:            aws.String("Count"),
+					},
+					{
+						MetricName:      aws.String("InstanceGPUUsageTotal"),
+						MetricValueLong: aws.Int64(usage),
+						Unit:            aws.String("Count"),
+					},
+				},
+			},
+		},
+	}
+}
+
+type gpuDevice struct {
+	UUID        string
+	Utilization float64
+}
+
+func buildContainerGPUPayload(devices []gpuDevice) []*ecstcs.GeneralMetricsWrapper {
+	wrappers := make([]*ecstcs.GeneralMetricsWrapper, 0, len(devices))
+	for _, d := range devices {
+		util := d.Utilization
+		wrappers = append(wrappers, &ecstcs.GeneralMetricsWrapper{
+			Dimensions: []*ecstcs.Dimension{
+				{Key: aws.String("AcceleratedDevice"), Value: aws.String(d.UUID)},
+			},
+			GeneralMetrics: []*ecstcs.GeneralMetric{
+				{
+					MetricName:        aws.String("GPUUtilization"),
+					MetricValueDouble: &util,
+					Unit:              aws.String("Percent"),
+				},
+			},
+		})
+	}
+	return wrappers
+}
+
+func buildGPUTaskMetricsWithContainers(n, gpuTaskIndex int, gpuPayload []*ecstcs.GeneralMetricsWrapper) []*ecstcs.TaskMetric {
+	var taskMetrics []*ecstcs.TaskMetric
+	for i := 0; i < n; i++ {
+		taskArn := "task/" + strconv.Itoa(i)
+		containerName := "container-" + strconv.Itoa(i)
+		cm := &ecstcs.ContainerMetric{
+			ContainerName: aws.String(containerName),
+			CpuStatsSet: &ecstcs.CWStatsSet{
+				Max:         aws.Float64(30.0),
+				Min:         aws.Float64(5.0),
+				SampleCount: aws.Int64(2),
+				Sum:         aws.Float64(35.0),
+			},
+			MemoryStatsSet: &ecstcs.CWStatsSet{
+				Max:         aws.Float64(2048.0),
+				Min:         aws.Float64(1024.0),
+				SampleCount: aws.Int64(2),
+				Sum:         aws.Float64(3072.0),
+			},
+		}
+		if i == gpuTaskIndex && gpuPayload != nil {
+			cm.GeneralMetricsPayload = gpuPayload
+		}
+		taskMetrics = append(taskMetrics, &ecstcs.TaskMetric{
+			TaskArn:          aws.String(taskArn),
+			ContainerMetrics: []*ecstcs.ContainerMetric{cm},
+		})
+	}
+	return taskMetrics
 }
 
 func TestPayloadHandlerCalled(t *testing.T) {
@@ -1013,4 +1091,195 @@ func TestInvalidFormatMessageOnChannel(t *testing.T) {
 
 	// verify no request was made from the two ill-formed message
 	conn.EXPECT().WriteMessage(gomock.Any(), gomock.Any()).Times(0)
+}
+
+func TestGPUInstanceMetricsPaginationByTaskCount(t *testing.T) {
+	cs := tcsClientServer{}
+	numTasks := (tasksInMetricMessage * 2) + 1
+	var taskMetrics []*ecstcs.TaskMetric
+	for i := 0; i < numTasks; i++ {
+		taskArn := "task/" + strconv.Itoa(i)
+		taskMetrics = append(taskMetrics, &ecstcs.TaskMetric{TaskArn: aws.String(taskArn)})
+	}
+
+	requests, err := cs.metricsToPublishMetricRequests(ecstcs.TelemetryMessage{
+		InstanceMetrics: buildInstanceGPUMetrics(8, 5),
+		Metadata: &ecstcs.MetricsMetadata{
+			Cluster:           aws.String(testCluster),
+			ContainerInstance: aws.String(testContainerInstance),
+			Idle:              aws.Bool(false),
+			MessageId:         aws.String(testMessageId),
+		},
+		TaskMetrics: taskMetrics,
+	})
+	assert.NoError(t, err)
+	assert.Len(t, requests, 3)
+
+	assert.NotNil(t, requests[0].InstanceMetrics)
+	assert.Nil(t, requests[1].InstanceMetrics)
+	assert.Nil(t, requests[2].InstanceMetrics)
+
+	assert.Len(t, requests[0].InstanceMetrics.GeneralMetricsPayload, 1)
+	assert.Empty(t, requests[0].InstanceMetrics.GeneralMetricsPayload[0].Dimensions)
+	assert.Len(t, requests[0].InstanceMetrics.GeneralMetricsPayload[0].GeneralMetrics, 2)
+}
+
+func TestGPUInstanceMetricsNilNeverLeaks(t *testing.T) {
+	cs := tcsClientServer{}
+	var taskMetrics []*ecstcs.TaskMetric
+	for i := 0; i < 21; i++ {
+		taskArn := "task/" + strconv.Itoa(i)
+		taskMetrics = append(taskMetrics, &ecstcs.TaskMetric{TaskArn: aws.String(taskArn)})
+	}
+
+	requests, err := cs.metricsToPublishMetricRequests(ecstcs.TelemetryMessage{
+		InstanceMetrics: nil,
+		Metadata: &ecstcs.MetricsMetadata{
+			Cluster:           aws.String(testCluster),
+			ContainerInstance: aws.String(testContainerInstance),
+			Idle:              aws.Bool(false),
+			MessageId:         aws.String(testMessageId),
+		},
+		TaskMetrics: taskMetrics,
+	})
+	assert.NoError(t, err)
+	assert.Len(t, requests, 3)
+
+	for _, req := range requests {
+		assert.Nil(t, req.InstanceMetrics)
+	}
+}
+
+func TestGPUContainerMetricsSingleRequest(t *testing.T) {
+	cs := tcsClientServer{}
+	gpuPayload := buildContainerGPUPayload([]gpuDevice{
+		{UUID: "GPU-aaa", Utilization: 75.0},
+	})
+	taskMetrics := buildGPUTaskMetricsWithContainers(1, 0, gpuPayload)
+
+	requests, err := cs.metricsToPublishMetricRequests(ecstcs.TelemetryMessage{
+		InstanceMetrics: buildInstanceGPUMetrics(2, 1),
+		Metadata: &ecstcs.MetricsMetadata{
+			Cluster:           aws.String(testCluster),
+			ContainerInstance: aws.String(testContainerInstance),
+			Idle:              aws.Bool(false),
+			MessageId:         aws.String(testMessageId),
+		},
+		TaskMetrics: taskMetrics,
+	})
+	assert.NoError(t, err)
+	assert.Len(t, requests, 1)
+
+	cm := requests[0].TaskMetrics[0].ContainerMetrics[0]
+	require.NotNil(t, cm.GeneralMetricsPayload)
+	require.Len(t, cm.GeneralMetricsPayload, 1)
+
+	wrapper := cm.GeneralMetricsPayload[0]
+	assert.Equal(t, "AcceleratedDevice", aws.ToString(wrapper.Dimensions[0].Key))
+	assert.Equal(t, "GPU-aaa", aws.ToString(wrapper.Dimensions[0].Value))
+	assert.Equal(t, "GPUUtilization", aws.ToString(wrapper.GeneralMetrics[0].MetricName))
+	assert.Equal(t, 75.0, aws.ToFloat64(wrapper.GeneralMetrics[0].MetricValueDouble))
+
+	assert.NotNil(t, cm.CpuStatsSet)
+	assert.NotNil(t, cm.MemoryStatsSet)
+}
+
+func TestGPUContainerMetricsMultipleDevices(t *testing.T) {
+	cs := tcsClientServer{}
+	devices := []gpuDevice{
+		{UUID: "GPU-aaa", Utilization: 50.0},
+		{UUID: "GPU-bbb", Utilization: 80.0},
+	}
+	gpuPayload := buildContainerGPUPayload(devices)
+	taskMetrics := buildGPUTaskMetricsWithContainers(1, 0, gpuPayload)
+
+	requests, err := cs.metricsToPublishMetricRequests(ecstcs.TelemetryMessage{
+		InstanceMetrics: buildInstanceGPUMetrics(4, 2),
+		Metadata: &ecstcs.MetricsMetadata{
+			Cluster:           aws.String(testCluster),
+			ContainerInstance: aws.String(testContainerInstance),
+			Idle:              aws.Bool(false),
+			MessageId:         aws.String(testMessageId),
+		},
+		TaskMetrics: taskMetrics,
+	})
+	assert.NoError(t, err)
+	assert.Len(t, requests, 1)
+
+	cm := requests[0].TaskMetrics[0].ContainerMetrics[0]
+	require.Len(t, cm.GeneralMetricsPayload, 2)
+
+	for i, wrapper := range cm.GeneralMetricsPayload {
+		assert.Equal(t, "AcceleratedDevice", aws.ToString(wrapper.Dimensions[0].Key))
+		assert.Equal(t, devices[i].UUID, aws.ToString(wrapper.Dimensions[0].Value))
+		assert.Equal(t, devices[i].Utilization, aws.ToFloat64(wrapper.GeneralMetrics[0].MetricValueDouble))
+	}
+}
+
+func TestGPUContainerMetricsOmittedWhenAbsent(t *testing.T) {
+	cs := tcsClientServer{}
+	taskMetrics := buildGPUTaskMetricsWithContainers(2, -1, nil)
+
+	requests, err := cs.metricsToPublishMetricRequests(ecstcs.TelemetryMessage{
+		InstanceMetrics: buildInstanceGPUMetrics(2, 0),
+		Metadata: &ecstcs.MetricsMetadata{
+			Cluster:           aws.String(testCluster),
+			ContainerInstance: aws.String(testContainerInstance),
+			Idle:              aws.Bool(false),
+			MessageId:         aws.String(testMessageId),
+		},
+		TaskMetrics: taskMetrics,
+	})
+	assert.NoError(t, err)
+
+	for _, req := range requests {
+		for _, tm := range req.TaskMetrics {
+			for _, cm := range tm.ContainerMetrics {
+				assert.Nil(t, cm.GeneralMetricsPayload)
+				assert.NotNil(t, cm.CpuStatsSet)
+				assert.NotNil(t, cm.MemoryStatsSet)
+			}
+		}
+	}
+}
+
+func TestGPUContainerMetricsSurvivePagination(t *testing.T) {
+	tempLimit := publishMetricRequestSizeLimit
+	publishMetricRequestSizeLimit = testPublishMetricRequestSizeLimitNonSCWithInstanceMetrics
+	defer func() {
+		publishMetricRequestSizeLimit = tempLimit
+	}()
+
+	cs := tcsClientServer{}
+	gpuPayload := buildContainerGPUPayload([]gpuDevice{
+		{UUID: "GPU-aaa", Utilization: 60.0},
+	})
+	taskMetrics := buildGPUTaskMetricsWithContainers(3, 0, gpuPayload)
+
+	requests, err := cs.metricsToPublishMetricRequests(ecstcs.TelemetryMessage{
+		InstanceMetrics: buildInstanceGPUMetrics(4, 1),
+		Metadata: &ecstcs.MetricsMetadata{
+			Cluster:           aws.String(testCluster),
+			ContainerInstance: aws.String(testContainerInstance),
+			Idle:              aws.Bool(false),
+			MessageId:         aws.String(testMessageId),
+		},
+		TaskMetrics: taskMetrics,
+	})
+	assert.NoError(t, err)
+	require.True(t, len(requests) >= 2)
+
+	var foundGPU bool
+	for _, req := range requests {
+		for _, tm := range req.TaskMetrics {
+			for _, cm := range tm.ContainerMetrics {
+				if cm.GeneralMetricsPayload != nil {
+					assert.False(t, foundGPU, "container GPU payload duplicated across batches")
+					foundGPU = true
+					assert.Equal(t, "GPU-aaa", aws.ToString(cm.GeneralMetricsPayload[0].Dimensions[0].Value))
+				}
+			}
+		}
+	}
+	assert.True(t, foundGPU)
 }
