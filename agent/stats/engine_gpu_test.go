@@ -408,3 +408,65 @@ func TestGetInstanceMetricsNoContainerGPUPayloadWithoutAssignment(t *testing.T) 
 	// No container payload; CPU/memory unaffected.
 	requireNoContainerGPUPayload(t, taskMetrics)
 }
+
+// TestGetInstanceMetricsConnectionLost verifies GPU emission behavior when
+// the DCGM metrics reader reports ConnectionLost. Both subtests are emitting
+// ticks — ConnectionLost is toggled to verify suppression vs emission.
+func TestGetInstanceMetricsConnectionLost(t *testing.T) {
+	testCases := []struct {
+		name           string
+		connectionLost bool
+		expectGPUEmit  bool
+	}{
+		{
+			name:           "connection lost suppresses GPU at both scopes",
+			connectionLost: true,
+			expectGPUEmit:  false,
+		},
+		{
+			name:           "connection healthy emits GPU normally",
+			connectionLost: false,
+			expectGPUEmit:  true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
+
+			engine, cancel := setupGPUStatsEngine(t, mockCtrl, []string{"GPU-1"})
+			defer cancel()
+
+			fake := &fakeDCGMMetricsReader{data: &gputypes.GPUMetricsFileData{
+				Timestamp:      "2026-07-19T00:00:00Z",
+				Healthy:        true,
+				ConnectionLost: tc.connectionLost,
+				GPUs:           []gputypes.GPUMetric{{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)}},
+			}}
+			engine.SetGPUMetricsReader(fake)
+
+			feedFakeStats(engine)
+			_, taskMetrics, instanceMetrics, err := engine.GetInstanceMetrics(false, true)
+			require.NoError(t, err)
+
+			if tc.expectGPUEmit {
+				requireInstanceGPUPayload(t, instanceMetrics, 1, 1)
+				require.Len(t, taskMetrics, 1)
+				require.Len(t, taskMetrics[0].ContainerMetrics, 1)
+				requireContainerGPUPayload(t, taskMetrics[0].ContainerMetrics[0], []string{"GPU-1"})
+			} else {
+				assert.Nil(t, instanceMetrics, "instance GPU must not be emitted when ConnectionLost=true")
+				requireNoContainerGPUPayload(t, taskMetrics)
+			}
+
+			// CPU/memory must keep flowing regardless of ConnectionLost.
+			require.NotEmpty(t, taskMetrics)
+			require.NotEmpty(t, taskMetrics[0].ContainerMetrics)
+			assert.NotNil(t, taskMetrics[0].ContainerMetrics[0].CpuStatsSet,
+				"CPU metrics must keep flowing")
+			assert.NotNil(t, taskMetrics[0].ContainerMetrics[0].MemoryStatsSet,
+				"memory metrics must keep flowing")
+		})
+	}
+}
