@@ -1209,10 +1209,10 @@ func (engine *DockerStatsEngine) snapshotGPUMetrics(includeGPUMetrics bool) ([]g
 		return nil, ""
 	}
 	data := reader.GetGPUMetrics()
-	if data == nil || len(data.GPUs) == 0 {
+	if data == nil || len(data.GPUs) == 0 || data.ConnectionLost {
 		return nil, ""
 	}
-	if data.Timestamp == lastEmitted {
+	if data.Timestamp <= lastEmitted {
 		// dcgm-init has not written a new snapshot since the last emission.
 		return nil, ""
 	}
