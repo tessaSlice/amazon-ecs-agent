@@ -19,7 +19,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
-// GPU metric names as they appear in the TACS GeneralMetric payload.
 const (
 	gpuMetricNameGPUUtilization        = "GPUUtilization"
 	gpuMetricNameGPUMemoryUtilization  = "GPUMemoryUtilization"
@@ -32,7 +31,6 @@ const (
 	gpuMetricNameGPURestartAppXidCount = "GPURestartAppXidCount"
 )
 
-// GPU metric units matching CloudWatch unit conventions.
 const (
 	gpuMetricUnitPercent = "Percent"
 	gpuMetricUnitBytes   = "Bytes"
@@ -40,11 +38,10 @@ const (
 	gpuMetricUnitCount   = "Count"
 )
 
-// gpuDeviceDimensionKey is the dimension key used to identify accelerated devices.
 const gpuDeviceDimensionKey = "AcceleratedDevice"
 
-// GPUMetricToGeneralMetricsWrapper converts a single GPUMetric to a GeneralMetricsWrapper.
-// Only non-nil metric fields are included. Returns nil if all metric fields are nil.
+// GPUMetricToGeneralMetricsWrapper converts a GPUMetric to a dimensioned wrapper.
+// Returns nil if all metric fields are nil.
 func GPUMetricToGeneralMetricsWrapper(m gputypes.GPUMetric) *ecstcs.GeneralMetricsWrapper {
 	var generalMetrics []*ecstcs.GeneralMetric
 
@@ -96,7 +93,6 @@ func GPUMetricToGeneralMetricsWrapper(m gputypes.GPUMetric) *ecstcs.GeneralMetri
 		return nil
 	}
 
-	// Always include RESTART_APP XID count so customers see 0 instead of "No Data".
 	xidCount := m.RestartAppXidCount
 	generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
 		MetricName:      aws.String(gpuMetricNameGPURestartAppXidCount),
@@ -115,10 +111,8 @@ func GPUMetricToGeneralMetricsWrapper(m gputypes.GPUMetric) *ecstcs.GeneralMetri
 	}
 }
 
-// GPUMetricsToInstancePayload converts a slice of GPUMetrics to instance-level
-// GeneralMetricsWrapper entries containing InstanceGPULimit and InstanceGPUUsageTotal.
-// The usageTotal parameter is the pre-computed count of unique GPU device IDs assigned
-// to running task containers. Returns nil if the input slice is empty.
+// GPUMetricsToInstancePayload builds the instance-level GPU wrapper with
+// InstanceGPULimit and InstanceGPUUsageTotal. Returns nil if metrics is empty.
 func GPUMetricsToInstancePayload(metrics []gputypes.GPUMetric, usageTotal int64) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 {
 		return nil
@@ -144,9 +138,8 @@ func GPUMetricsToInstancePayload(metrics []gputypes.GPUMetric, usageTotal int64)
 	}
 }
 
-// ExtractInstanceGPUPayloadValues extracts InstanceGPULimit and InstanceGPUUsageTotal
-// values from a GeneralMetricsWrapper slice produced by GPUMetricsToInstancePayload.
-// Returns ok=false if the payload structure is unexpected.
+// ExtractInstanceGPUPayloadValues extracts limit and usage from a payload
+// produced by GPUMetricsToInstancePayload. Returns ok=false on unexpected shape.
 func ExtractInstanceGPUPayloadValues(payload []*ecstcs.GeneralMetricsWrapper) (limit int64, usage int64, ok bool) {
 	if len(payload) == 0 {
 		return 0, 0, false
@@ -173,15 +166,12 @@ func ExtractInstanceGPUPayloadValues(payload []*ecstcs.GeneralMetricsWrapper) (l
 	return limit, usage, foundLimit && foundUsage
 }
 
-// GPUMetricsForContainer returns the GeneralMetricsWrapper entries for a specific
-// container based on its assigned GPU device IDs. It matches GPUMetric GPUUUID
-// against the provided device ID list.
+// GPUMetricsForContainer returns wrappers for the GPUs assigned to a container.
 func GPUMetricsForContainer(metrics []gputypes.GPUMetric, gpuDeviceIDs []string) []*ecstcs.GeneralMetricsWrapper {
 	if len(metrics) == 0 || len(gpuDeviceIDs) == 0 {
 		return nil
 	}
 
-	// Build a set of device IDs for O(1) lookup.
 	deviceIDSet := make(map[string]struct{}, len(gpuDeviceIDs))
 	for _, id := range gpuDeviceIDs {
 		deviceIDSet[id] = struct{}{}

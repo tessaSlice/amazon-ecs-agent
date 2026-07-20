@@ -24,18 +24,13 @@ import (
 )
 
 const (
-	// emitInterval is how much time the metric emission loop should wait
-	// between each metric emission.
-	emitInterval = 1 * time.Minute
-
-	// emitThreshold is the duration of time that must elapse after failingSince
-	// before metric can be emitted.
+	emitInterval  = 1 * time.Minute
 	emitThreshold = 1 * time.Minute
 )
 
-// FailureTracker tracks whether an operation has been in a failure state
-// continuously for more than emitThreshold and, if so, emits a metric every
-// emitInterval.
+// FailureTracker emits a metric every emitInterval while an operation has been
+// continuously failing for longer than emitThreshold.
+// All methods are nil-receiver safe for use with optional functional options.
 type FailureTracker struct {
 	failingSince   time.Time
 	isFailing      bool
@@ -44,7 +39,6 @@ type FailureTracker struct {
 	mu             sync.Mutex
 }
 
-// NewFailureTracker creates a new FailureTracker.
 func NewFailureTracker(metricName string, metricsFactory EntryFactory) *FailureTracker {
 	return &FailureTracker{
 		metricName:     metricName,
@@ -52,7 +46,6 @@ func NewFailureTracker(metricName string, metricsFactory EntryFactory) *FailureT
 	}
 }
 
-// RecordSuccess marks a successful operation and resets the failure state.
 func (ft *FailureTracker) RecordSuccess() {
 	if ft == nil {
 		return
@@ -62,7 +55,6 @@ func (ft *FailureTracker) RecordSuccess() {
 	ft.isFailing = false
 }
 
-// RecordFailure marks the start of a failure period if not already failing.
 func (ft *FailureTracker) RecordFailure() {
 	if ft == nil {
 		return
@@ -75,8 +67,6 @@ func (ft *FailureTracker) RecordFailure() {
 	}
 }
 
-// StartEmitLoop runs emitIfFailing once every emitInterval until ctx is cancelled.
-// This function is meant to be called by the entity creating the FailureTracker itself.
 func (ft *FailureTracker) StartEmitLoop(ctx context.Context) {
 	if ft == nil {
 		return
@@ -99,7 +89,6 @@ func (ft *FailureTracker) StartEmitLoop(ctx context.Context) {
 	}
 }
 
-// IsFailing returns whether the operation being tracked is currently failing.
 func (ft *FailureTracker) IsFailing() bool {
 	if ft == nil {
 		return false
@@ -109,8 +98,6 @@ func (ft *FailureTracker) IsFailing() bool {
 	return ft.isFailing
 }
 
-// emitIfFailing emits metric if its associated operation has been
-// continuously failing for an amount of time greater than emitThreshold.
 func (ft *FailureTracker) emitIfFailing() {
 	if ft == nil {
 		return

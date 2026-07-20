@@ -125,13 +125,8 @@ func getModInfoBinds(statFn func(string) (os.FileInfo, error)) []string {
 	return binds
 }
 
-// cloudInitResultFile is the path to cloud-init's result.json file which records
-// the datasource used during instance boot.
 const cloudInitResultFile = "/var/lib/cloud/data/result.json"
 
-// getCloudInitResultBinds returns a read-only bind mount for cloud-init's result.json
-// if the file exists on the host. Returns an empty slice if the file is missing or
-// if running in external (non-EC2) mode where cloud-init is not applicable.
 func getCloudInitResultBinds(statFn func(string) (os.FileInfo, error)) []string {
 	if config.RunningInExternal() {
 		return []string{}

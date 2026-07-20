@@ -80,17 +80,12 @@ type telemetrySession struct {
 	tcsConnFailureTracker         *metrics.FailureTracker
 }
 
-// TelemetrySessionOption configures optional behavior on the TCS session.
 type TelemetrySessionOption func(*telemetrySession)
 
-// WithDPEFailureTracker sets the FailureTracker used to track
-// DiscoverPollEndpoint failures across retry attempts.
 func WithDPEFailureTracker(dpeFailureTracker *metrics.FailureTracker) TelemetrySessionOption {
 	return func(session *telemetrySession) { session.dpeFailureTracker = dpeFailureTracker }
 }
 
-// WithTCSConnFailureTracker sets the FailureTracker used to track TCS
-// connection failures across retry attempts.
 func WithTCSConnFailureTracker(tcsConnFailureTracker *metrics.FailureTracker) TelemetrySessionOption {
 	return func(session *telemetrySession) { session.tcsConnFailureTracker = tcsConnFailureTracker }
 }

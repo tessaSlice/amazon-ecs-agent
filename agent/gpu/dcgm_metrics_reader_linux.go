@@ -27,31 +27,21 @@ import (
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger/field"
 )
 
-// DCGMMetricsReader reads GPU metrics from the shared file written by dcgm-init
-// and provides them to the stats engine for TACS reporting.
+// DCGMMetricsReader reads the GPU metrics JSON file written by dcgm-init.
 type DCGMMetricsReader struct {
 	filePath string
 }
 
-// NewDCGMMetricsReader returns a reader for filePath, defaulting to the shared
-// gputypes.GPUMetricsFilePath when empty.
 func NewDCGMMetricsReader(filePath string) *DCGMMetricsReader {
 	if filePath == "" {
 		filePath = gputypes.GPUMetricsFilePath
 	}
-	return &DCGMMetricsReader{
-		filePath: filePath,
-	}
+	return &DCGMMetricsReader{filePath: filePath}
 }
 
-// GetGPUMetrics reads and parses the GPU metrics file, returning nil if it is
-// missing, unreadable, corrupt, or has an invalid timestamp. A missing file is
-// the expected pre-first-write state (logged at Debug); an unreadable or corrupt
-// file is unexpected (logged at Warn). The caller detects staleness via the
-// returned Timestamp.
+// GetGPUMetrics reads and parses the GPU metrics file. Returns nil if the file
+// is missing, unreadable, corrupt, or has an invalid timestamp.
 func (r *DCGMMetricsReader) GetGPUMetrics() *gputypes.GPUMetricsFileData {
-	// A single os.ReadFile covers every case: fs.ErrNotExist is the expected
-	// missing/pre-first-write file (Debug); any other error is unexpected (Warn).
 	data, err := os.ReadFile(r.filePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -62,14 +52,12 @@ func (r *DCGMMetricsReader) GetGPUMetrics() *gputypes.GPUMetricsFileData {
 		return nil
 	}
 
-	// Unmarshal also rejects an empty/whitespace-only file, so no separate check.
 	var fileData gputypes.GPUMetricsFileData
 	if err := json.Unmarshal(data, &fileData); err != nil {
 		logger.Warn("Failed to parse GPU metrics file", logger.Fields{field.Error: err})
 		return nil
 	}
 
-	// Reject files with an unparseable timestamp as corrupt.
 	if _, err := time.Parse(time.RFC3339, fileData.Timestamp); err != nil {
 		logger.Warn("Failed to parse GPU metrics timestamp", logger.Fields{field.Error: err})
 		return nil

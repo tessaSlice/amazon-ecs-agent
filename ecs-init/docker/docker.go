@@ -113,7 +113,6 @@ const (
 
 	execAgentLogRelativePath = "/exec"
 
-	// gpuMetricsDirPerm is the permission for the GPU metrics dir created on the host.
 	gpuMetricsDirPerm os.FileMode = 0755
 
 	// nvidiaGPUDevicesPresentRetryTime specifies the duration of time to wait before retrying to check if NVIDIA
@@ -489,13 +488,10 @@ func (c *client) getHostConfig(envVarsFromFiles map[string]string) *godocker.Hos
 	for key, val := range c.LoadEnvVars() {
 		if key == config.GPUSupportEnvVar && val == "true" {
 			if nvidiaGPUDevicesPresent() {
-				// bind mount gpu info dir
 				binds = append(binds, gpu.GPUInfoDirPath+":"+gpu.GPUInfoDirPath)
-				// Ensure the gpu metrics dir exists on the host before bind mounting it.
 				if err := mkdirAll(gputypes.GPUMetricsDirPath, gpuMetricsDirPerm); err != nil {
 					log.Errorf("Failed to create gpu metrics directory %s, skipping bind mount: %v", gputypes.GPUMetricsDirPath, err)
 				} else {
-					// bind mount gpu metrics dir
 					binds = append(binds, gputypes.GPUMetricsDirPath+":"+gputypes.GPUMetricsDirPath+readOnly)
 				}
 			}
