@@ -92,9 +92,11 @@ func GPUMetricToGeneralMetricsWrapper(m gputypes.GPUMetric) *ecstcs.GeneralMetri
 			Unit:              aws.String(gpuMetricUnitNone),
 		})
 	}
+	if len(generalMetrics) == 0 {
+		return nil
+	}
+
 	// Always include RESTART_APP XID count so customers see 0 instead of "No Data".
-	// This must be appended before the emptiness check: a GPU whose standard telemetry
-	// fields are all unavailable (NOT_SUPPORTED) may still have accumulated XID events.
 	xidCount := m.RestartAppXidCount
 	generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
 		MetricName:      aws.String(gpuMetricNameGPURestartAppXidCount),
