@@ -714,10 +714,12 @@ func (agent *ecsAgent) newDoctorWithHealthchecks(cluster, containerInstanceARN s
 		runtimeHealthCheck,
 	}
 
-	// Register the GPU healthcheck when GPU support is enabled. On non-Linux
-	// platforms the DCGMMetricsReader is a no-op that always returns nil, so the
-	// healthcheck safely reports INSUFFICIENT_DATA without platform-specific code.
-	if agent.cfg.GPUSupportEnabled {
+	// Register the GPU (ACCELERATED_COMPUTE) healthcheck only when GPU support is
+	// enabled AND the platform supports it. dcgm-init is linux-only, so
+	// agentgpu.GPUHealthcheckSupported is false on non-linux — there we do not
+	// register the check at all, so ACCELERATED_COMPUTE is never emitted (rather
+	// than emitted as INSUFFICIENT_DATA).
+	if agent.cfg.GPUSupportEnabled && agentgpu.GPUHealthcheckSupported {
 		gpuReader := agentgpu.NewDCGMMetricsReader("")
 		healthcheckList = append(healthcheckList, dockerdoctor.NewGPUHealthcheck(gpuReader))
 	}
