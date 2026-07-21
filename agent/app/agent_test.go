@@ -1979,21 +1979,14 @@ func gpuHealthcheckRegistered(doc *doctor.Doctor) bool {
 	return false
 }
 
-// TestNewDoctorGPUHealthcheckRegistration verifies the registration gate in
-// newDoctorWithHealthchecks: the GPU (ACCELERATED_COMPUTE) check is registered
-// only when GPU support is enabled AND the platform supports it
-// (agentgpu.GPUHealthcheckSupported). This guards against regressions that would
-// emit ACCELERATED_COMPUTE (as INSUFFICIENT_DATA) on platforms where dcgm-init
-// does not run.
+// TestNewDoctorGPUHealthcheckRegistration verifies the GPU (ACCELERATED_COMPUTE)
+// check is registered only when GPU support is enabled.
 func TestNewDoctorGPUHealthcheckRegistration(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	// The agent only ships on Linux, where GPUHealthcheckSupported is true. Assert
-	// the enabled expectation as a hard true rather than deriving it from the same
-	// constant the production code uses (which would make the assertion vacuous if
-	// both flipped together). Guard so the test is honest if ever run on a platform
-	// where the constant is false.
+	// Skip off-platform so the enabled case can assert a hard true rather than
+	// mirroring the production constant (which would be vacuous).
 	if !agentgpu.GPUHealthcheckSupported {
 		t.Skip("GPUHealthcheckSupported is false on this platform; registration gate test is Linux-only")
 	}

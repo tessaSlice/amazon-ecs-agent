@@ -23,9 +23,8 @@ import (
 	gputypes "github.com/aws/amazon-ecs-agent/ecs-agent/gpu/types"
 )
 
-// GPUHealthcheckSupported reports whether the ACCELERATED_COMPUTE health check can
-// run on this platform. dcgm-init is linux-only, so on non-linux platforms the check
-// is not registered at all (rather than registered and reporting INSUFFICIENT_DATA).
+// GPUHealthcheckSupported gates the ACCELERATED_COMPUTE check; dcgm-init is
+// linux-only, so non-linux skips it entirely (rather than emitting INSUFFICIENT_DATA).
 const GPUHealthcheckSupported = false
 
 // DCGMMetricsReader is the non-linux no-op counterpart of the linux reader; it holds

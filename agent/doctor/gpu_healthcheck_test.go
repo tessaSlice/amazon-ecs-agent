@@ -67,10 +67,8 @@ func TestGPUHealthcheckReportsImpairedWhenUnhealthy(t *testing.T) {
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusImpaired, status)
 }
 
-// assertBootGraceThenInsufficientData runs the check twice against a reader whose
-// GetGPUMetrics returns nil: once within gpuBootGracePeriod of construction
-// (status must stay INITIALIZING, no flip) and once after the grace window has
-// elapsed (status must flip to INSUFFICIENT_DATA).
+// assertBootGraceThenInsufficientData checks a nil-returning reader stays
+// INITIALIZING within the boot grace, then flips to INSUFFICIENT_DATA after it.
 func assertBootGraceThenInsufficientData(t *testing.T, handler *gpu.DCGMMetricsReader) {
 	t.Helper()
 
@@ -119,11 +117,8 @@ func TestGPUHealthcheckReportsInsufficientDataWhenFileEmpty(t *testing.T) {
 	assertBootGraceThenInsufficientData(t, handler)
 }
 
-// Boot grace must not mask MID-GRACE data loss: once any data-derived status
-// exists (here OK from a healthy read), a subsequent nil read must report
-// INSUFFICIENT_DATA immediately even though the boot grace window has not yet
-// elapsed. The grace only covers the initial INITIALIZING period before the
-// first successful read.
+// After a first successful read, data loss reports INSUFFICIENT_DATA immediately
+// even within the boot grace: the grace covers only the initial INITIALIZING period.
 func TestGPUHealthcheckDataLossWithinGraceReportsInsufficientData(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
@@ -153,9 +148,8 @@ func TestGPUHealthcheckDataLossWithinGraceReportsInsufficientData(t *testing.T) 
 		"data loss after a data-derived status must report INSUFFICIENT_DATA even within the boot grace window")
 }
 
-// connection_lost=true means dcgm-init cannot determine GPU health, so the check
-// must report INSUFFICIENT_DATA even though healthy=true (dcgm-init leaves Healthy
-// true while disconnected).
+// connection_lost=true reports INSUFFICIENT_DATA even when healthy=true, since
+// dcgm-init leaves Healthy true while disconnected.
 func TestGPUHealthcheckReportsInsufficientDataWhenConnectionLost(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
@@ -175,9 +169,8 @@ func TestGPUHealthcheckReportsInsufficientDataWhenConnectionLost(t *testing.T) {
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status)
 }
 
-// Timestamp age and direction do not affect GPU health. The reader validates
-// timestamp syntax, while RunCheck derives status only from data availability,
-// connection_lost, and healthy.
+// A timestamp older than the staleness threshold reports INSUFFICIENT_DATA; a
+// future one is treated as fresh.
 func TestGPUHealthcheckTimestampStaleness(t *testing.T) {
 	t.Run("stale timestamp reports INSUFFICIENT_DATA", func(t *testing.T) {
 		filePath := filepath.Join(t.TempDir(), "gpu-metrics.json")
@@ -198,11 +191,8 @@ func TestGPUHealthcheckTimestampStaleness(t *testing.T) {
 	})
 }
 
-// CASE 3 — connectionlost-with-unhealthy-ordering: when both connection_lost=true
-// and healthy=false (with an unhealthy_reason) are present in a fresh file, the
-// ConnectionLost guard short-circuits BEFORE the unhealthy/Impaired path, so
-// RunCheck returns INSUFFICIENT_DATA, not IMPAIRED. This locks connection-lost
-// precedence over an unhealthy report.
+// connection_lost=true takes precedence over healthy=false: RunCheck returns
+// INSUFFICIENT_DATA, not IMPAIRED.
 func TestGPUHealthcheckConnectionLostBeatsUnhealthy(t *testing.T) {
 	// Anchor timeNow near the file's timestamp so it is not stale.
 	base := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
@@ -259,9 +249,7 @@ func TestGPUHealthcheckStatusTransition(t *testing.T) {
 }
 
 // TestGPUHealthcheckRecoversFromInsufficientData verifies the check is not
-// latched: once it reports INSUFFICIENT_DATA (here via connection_lost), a
-// later fresh, connected, healthy sample flips it back to OK. dcgm-init
-// restarting after a transient outage must not leave a healthy host stuck.
+// latched: after INSUFFICIENT_DATA, a fresh healthy sample flips it back to OK.
 func TestGPUHealthcheckRecoversFromInsufficientData(t *testing.T) {
 	// Anchor timeNow so the file timestamps are within the staleness threshold.
 	base := time.Date(2026, 1, 1, 0, 1, 30, 0, time.UTC)

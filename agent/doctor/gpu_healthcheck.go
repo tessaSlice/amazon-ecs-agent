@@ -22,29 +22,24 @@ import (
 	"github.com/cihub/seelog"
 )
 
-// gpuBootGracePeriod is how long after construction the healthcheck tolerates a
-// missing metrics file before flipping to INSUFFICIENT_DATA. dcgm-init writes
-// on a 60-second ticker, so the grace allows its first periodic sample to land.
-// ConditionPathExists can skip dcgm-init entirely on non-GPU hosts.
+// gpuBootGracePeriod tolerates a missing file at startup: dcgm-init's first
+// write lands ~60s in (no upfront write), plus jitter.
 const gpuBootGracePeriod = 90 * time.Second
 
-// gpuStalenessThreshold is the maximum age of a GPU metrics snapshot before the
-// healthcheck considers it stale and reports INSUFFICIENT_DATA. This prevents a
-// dead dcgm-init process from leaving a perpetually stale OK/IMPAIRED verdict.
-// Set to 3x the producer's 60-second tick to allow for transient write delays.
+// gpuStalenessThreshold is the max snapshot age before the file is stale
+// (INSUFFICIENT_DATA), catching a dead dcgm-init. 3x the 60s producer tick.
 const gpuStalenessThreshold = 180 * time.Second
 
-// gpuHealthcheck implements the ACCELERATED_COMPUTE instance health check. It
-// reads the shared GPU metrics file written by dcgm-init and derives a verdict.
+// gpuHealthcheck implements the ACCELERATED_COMPUTE check from the shared
+// metrics file written by dcgm-init.
 type gpuHealthcheck struct {
 	reader    *gpu.DCGMMetricsReader
 	createdAt time.Time
 	*statustracker.HealthCheckStatusTracker
 }
 
-// NewGPUHealthcheck creates a new GPU health check backed by the shared metrics
-// file (via DCGMMetricsReader). The check starts INITIALIZING and derives a
-// data-based status on the first successful read.
+// NewGPUHealthcheck creates a GPU health check backed by the shared metrics
+// file. It starts INITIALIZING and derives status on the first successful read.
 func NewGPUHealthcheck(reader *gpu.DCGMMetricsReader) *gpuHealthcheck {
 	return &gpuHealthcheck{
 		reader:                   reader,
@@ -80,8 +75,7 @@ func (ghc *gpuHealthcheck) RunCheck() ecstcs.InstanceHealthCheckStatus {
 		return ecstcs.InstanceHealthCheckStatusInsufficientData
 	}
 
-	// Detect a dead producer: if the timestamp is older than the staleness threshold,
-	// the file is outdated and the verdict is unreliable.
+	// A stale timestamp means dcgm-init stopped writing; the verdict is unreliable.
 	if ts, err := time.Parse(time.RFC3339, healthStatus.Timestamp); err == nil {
 		if timeNow().Sub(ts) > gpuStalenessThreshold {
 			seelog.Infof("[GPUHealthcheck] GPU metrics file is stale (age %v > %v)", timeNow().Sub(ts), gpuStalenessThreshold)

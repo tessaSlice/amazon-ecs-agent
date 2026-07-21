@@ -27,9 +27,8 @@ import (
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger/field"
 )
 
-// GPUHealthcheckSupported reports whether the ACCELERATED_COMPUTE health check can
-// run on this platform. dcgm-init is linux-only, so the check is registered only on
-// linux (subject to GPU support being enabled).
+// GPUHealthcheckSupported gates the ACCELERATED_COMPUTE check; dcgm-init is
+// linux-only, so it runs only on linux (when GPU support is enabled).
 const GPUHealthcheckSupported = true
 
 // DCGMMetricsReader reads GPU metrics from the shared file written by dcgm-init
