@@ -31,6 +31,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/sdkclientfactory"
 	dockerdoctor "github.com/aws/amazon-ecs-agent/agent/doctor" // for Docker specific container instance health checks
 	"github.com/aws/amazon-ecs-agent/agent/ebs"
+	agentgpu "github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	dm "github.com/aws/amazon-ecs-agent/agent/engine/daemonmanager"
@@ -713,8 +714,13 @@ func (agent *ecsAgent) newDoctorWithHealthchecks(cluster, containerInstanceARN s
 		runtimeHealthCheck,
 	}
 
-	// append the GPU healthcheck when supported on this platform (Linux + GPU enabled)
-	healthcheckList = agent.appendGPUHealthcheck(healthcheckList)
+	// Register the GPU healthcheck when GPU support is enabled. On non-Linux
+	// platforms the DCGMMetricsReader is a no-op that always returns nil, so the
+	// healthcheck safely reports INSUFFICIENT_DATA without platform-specific code.
+	if agent.cfg.GPUSupportEnabled {
+		gpuReader := agentgpu.NewDCGMMetricsReader("")
+		healthcheckList = append(healthcheckList, dockerdoctor.NewGPUHealthcheck(gpuReader))
+	}
 
 	// set up the doctor and return it
 	return doctor.NewDoctor(healthcheckList, cluster, containerInstanceARN)
