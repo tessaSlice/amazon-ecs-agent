@@ -257,3 +257,33 @@ func TestGPUHealthcheckStatusTransition(t *testing.T) {
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusImpaired, status)
 	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, hc.GetLastHealthcheckStatus())
 }
+
+// TestGPUHealthcheckRecoversFromInsufficientData verifies the check is not
+// latched: once it reports INSUFFICIENT_DATA (here via connection_lost), a
+// later fresh, connected, healthy sample flips it back to OK. dcgm-init
+// restarting after a transient outage must not leave a healthy host stuck.
+func TestGPUHealthcheckRecoversFromInsufficientData(t *testing.T) {
+	// Anchor timeNow so the file timestamps are within the staleness threshold.
+	base := time.Date(2026, 1, 1, 0, 1, 30, 0, time.UTC)
+	original := timeNow
+	timeNow = func() time.Time { return base }
+	defer func() { timeNow = original }()
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+
+	handler := gpu.NewDCGMMetricsReader(filePath)
+	hc := NewGPUHealthcheck(handler)
+
+	// First: connection lost -> INSUFFICIENT_DATA.
+	err := os.WriteFile(filePath, []byte(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"connection_lost":true,"gpus":[]}`), 0644)
+	require.NoError(t, err)
+	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.RunCheck())
+
+	// Then: a fresh, connected, healthy sample must recover to OK.
+	err = os.WriteFile(filePath, []byte(`{"timestamp":"2026-01-01T00:01:00Z","healthy":true,"gpus":[]}`), 0644)
+	require.NoError(t, err)
+	status := hc.RunCheck()
+	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, status)
+	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.GetLastHealthcheckStatus())
+}

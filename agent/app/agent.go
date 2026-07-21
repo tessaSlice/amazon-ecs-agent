@@ -31,7 +31,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/sdkclientfactory"
 	dockerdoctor "github.com/aws/amazon-ecs-agent/agent/doctor" // for Docker specific container instance health checks
 	"github.com/aws/amazon-ecs-agent/agent/ebs"
-	agentgpu "github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
 	dm "github.com/aws/amazon-ecs-agent/agent/engine/daemonmanager"
@@ -41,6 +40,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/eni/pause"
 	"github.com/aws/amazon-ecs-agent/agent/eni/watcher"
 	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
+	agentgpu "github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/handlers"
 	"github.com/aws/amazon-ecs-agent/agent/imdscreds"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers"

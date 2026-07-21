@@ -42,6 +42,7 @@ import (
 	mock_execcmdagent "github.com/aws/amazon-ecs-agent/agent/engine/execcmd/mocks"
 	mock_engine "github.com/aws/amazon-ecs-agent/agent/engine/mocks"
 	mock_serviceconnect "github.com/aws/amazon-ecs-agent/agent/engine/serviceconnect/mock"
+	agentgpu "github.com/aws/amazon-ecs-agent/agent/gpu"
 	"github.com/aws/amazon-ecs-agent/agent/sighandlers/exitcodes"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	mock_statemanager "github.com/aws/amazon-ecs-agent/agent/statemanager/mocks"
@@ -52,10 +53,12 @@ import (
 	mock_ecs "github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs/mocks"
 	apierrors "github.com/aws/amazon-ecs-agent/ecs-agent/api/errors"
 	mock_credentials "github.com/aws/amazon-ecs-agent/ecs-agent/credentials/mocks"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/doctor"
 	mock_ec2 "github.com/aws/amazon-ecs-agent/ecs-agent/ec2/mocks"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/ipcompatibility"
 	md "github.com/aws/amazon-ecs-agent/ecs-agent/manageddaemon"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/tcs/model/ecstcs"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
@@ -1963,6 +1966,62 @@ func TestSaveMetadata(t *testing.T) {
 	az, err := dataClient.GetMetadata(data.AvailabilityZoneKey)
 	require.NoError(t, err)
 	assert.Equal(t, availabilityZone, az)
+}
+
+// gpuHealthcheckRegistered reports whether the doctor's healthcheck list
+// includes the ACCELERATED_COMPUTE (GPU) check.
+func gpuHealthcheckRegistered(doc *doctor.Doctor) bool {
+	for _, hc := range *doc.GetHealthchecks() {
+		if hc.GetHealthcheckType() == ecstcs.InstanceHealthCheckTypeAcceleratedCompute {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNewDoctorGPUHealthcheckRegistration verifies the registration gate in
+// newDoctorWithHealthchecks: the GPU (ACCELERATED_COMPUTE) check is registered
+// only when GPU support is enabled AND the platform supports it
+// (agentgpu.GPUHealthcheckSupported). This guards against regressions that would
+// emit ACCELERATED_COMPUTE (as INSUFFICIENT_DATA) on platforms where dcgm-init
+// does not run.
+func TestNewDoctorGPUHealthcheckRegistration(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	testCases := []struct {
+		name              string
+		gpuSupportEnabled bool
+		// expected registration = gpuSupportEnabled AND the platform constant.
+		expectRegistered bool
+	}{
+		{
+			name:              "GPU support enabled registers the check when platform supports it",
+			gpuSupportEnabled: true,
+			expectRegistered:  agentgpu.GPUHealthcheckSupported,
+		},
+		{
+			name:              "GPU support disabled never registers the check",
+			gpuSupportEnabled: false,
+			expectRegistered:  false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := getTestConfig()
+			cfg.GPUSupportEnabled = tc.gpuSupportEnabled
+			agent := &ecsAgent{
+				cfg:          &cfg,
+				dockerClient: mock_dockerapi.NewMockDockerClient(ctrl),
+			}
+
+			doc, err := agent.newDoctorWithHealthchecks("cluster", "container-instance-arn")
+			require.NoError(t, err)
+			assert.Equal(t, tc.expectRegistered, gpuHealthcheckRegistered(doc),
+				"ACCELERATED_COMPUTE registration should equal GPUSupportEnabled && GPUHealthcheckSupported")
+		})
+	}
 }
 
 func getTestConfig() config.Config {
