@@ -1989,16 +1989,24 @@ func TestNewDoctorGPUHealthcheckRegistration(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
+	// The agent only ships on Linux, where GPUHealthcheckSupported is true. Assert
+	// the enabled expectation as a hard true rather than deriving it from the same
+	// constant the production code uses (which would make the assertion vacuous if
+	// both flipped together). Guard so the test is honest if ever run on a platform
+	// where the constant is false.
+	if !agentgpu.GPUHealthcheckSupported {
+		t.Skip("GPUHealthcheckSupported is false on this platform; registration gate test is Linux-only")
+	}
+
 	testCases := []struct {
 		name              string
 		gpuSupportEnabled bool
-		// expected registration = gpuSupportEnabled AND the platform constant.
-		expectRegistered bool
+		expectRegistered  bool
 	}{
 		{
-			name:              "GPU support enabled registers the check when platform supports it",
+			name:              "GPU support enabled registers the check",
 			gpuSupportEnabled: true,
-			expectRegistered:  agentgpu.GPUHealthcheckSupported,
+			expectRegistered:  true,
 		},
 		{
 			name:              "GPU support disabled never registers the check",
@@ -2019,7 +2027,7 @@ func TestNewDoctorGPUHealthcheckRegistration(t *testing.T) {
 			doc, err := agent.newDoctorWithHealthchecks("cluster", "container-instance-arn")
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectRegistered, gpuHealthcheckRegistered(doc),
-				"ACCELERATED_COMPUTE registration should equal GPUSupportEnabled && GPUHealthcheckSupported")
+				"ACCELERATED_COMPUTE registration should track GPUSupportEnabled on a supported platform")
 		})
 	}
 }
