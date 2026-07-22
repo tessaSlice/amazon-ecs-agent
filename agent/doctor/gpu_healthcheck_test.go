@@ -27,251 +27,171 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGPUHealthcheckReportsOkWhenHealthy(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	freshTS := time.Now().UTC().Format(time.RFC3339)
-	err := os.WriteFile(filePath, []byte(`{
-		"timestamp": "`+freshTS+`",
-		"healthy": true,
-		"gpus": [{"gpu_uuid": "GPU-001"}]
-	}`), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	hc := NewGPUHealthcheck(handler)
-	status := hc.RunCheck()
-
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, status)
+func TestGPUHealthcheckType(t *testing.T) {
+	hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader("/nonexistent/gpu-metrics.json"))
 	assert.Equal(t, ecstcs.InstanceHealthCheckTypeAcceleratedCompute, hc.GetHealthcheckType())
 }
 
-func TestGPUHealthcheckReportsImpairedWhenUnhealthy(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+// TestGPUHealthcheckRunCheck is a table-driven test over RunCheck. Each case runs
+// one or more sequential steps against a single healthcheck instance; a step
+// optionally rewrites (or removes) the shared metrics file, sets the mocked
+// clock, runs the check, and asserts the resulting status. The clock is anchored
+// so every file timestamp has a deterministic age relative to the staleness
+// threshold, and createdAt fixes the boot-grace origin.
+func TestGPUHealthcheckRunCheck(t *testing.T) {
+	const (
+		ok           = ecstcs.InstanceHealthCheckStatusOk
+		impaired     = ecstcs.InstanceHealthCheckStatusImpaired
+		insufficient = ecstcs.InstanceHealthCheckStatusInsufficientData
+		initializing = ecstcs.InstanceHealthCheckStatusInitializing
+	)
+	str := func(s string) *string { return &s }
+	last := func(s ecstcs.InstanceHealthCheckStatus) *ecstcs.InstanceHealthCheckStatus { return &s }
 
-	freshTS := time.Now().UTC().Format(time.RFC3339)
-	err := os.WriteFile(filePath, []byte(`{
-		"timestamp": "`+freshTS+`",
-		"healthy": false,
-		"unhealthy_reason": "XID_48",
-		"gpus": [{"gpu_uuid": "GPU-001"}]
-	}`), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	hc := NewGPUHealthcheck(handler)
-	status := hc.RunCheck()
-
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusImpaired, status)
-}
-
-// assertBootGraceThenInsufficientData checks a nil-returning reader stays
-// INITIALIZING within the boot grace, then flips to INSUFFICIENT_DATA after it.
-func assertBootGraceThenInsufficientData(t *testing.T, handler *gpu.DCGMMetricsReader) {
-	t.Helper()
-
+	// base is the healthcheck construction time (boot-grace origin) for the
+	// multi-step scenarios; graceWithin/graceAfter bracket the boot grace window.
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	original := timeNow
-	timeNow = func() time.Time { return base }
-	defer func() { timeNow = original }()
+	graceWithin := base.Add(gpuBootGracePeriod - time.Second)
+	graceAfter := base.Add(gpuBootGracePeriod)
+	// fresh anchors the single-read cases; freshTS is an age-0 file timestamp.
+	fresh := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+	const freshTS = "2026-01-01T00:05:00Z"
 
-	hc := NewGPUHealthcheck(handler)
+	type step struct {
+		write    *string // rewrite the metrics file before the check
+		remove   bool    // remove the metrics file before the check
+		now      time.Time
+		want     ecstcs.InstanceHealthCheckStatus
+		wantLast *ecstcs.InstanceHealthCheckStatus // optional GetLastHealthcheckStatus assertion
+	}
 
-	// Within the boot grace window: no data yet is tolerated, status unchanged.
-	timeNow = func() time.Time { return base.Add(gpuBootGracePeriod - time.Second) }
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInitializing, hc.RunCheck(),
-		"missing GPU data within the boot grace window must not change the status")
+	testCases := []struct {
+		name      string
+		createdAt time.Time
+		steps     []step
+	}{
+		{
+			name:      "healthy reports OK",
+			createdAt: fresh,
+			steps: []step{{
+				write: str(`{"timestamp":"` + freshTS + `","healthy":true,"gpus":[{"gpu_uuid":"GPU-001"}]}`),
+				now:   fresh, want: ok,
+			}},
+		},
+		{
+			name:      "unhealthy reports IMPAIRED",
+			createdAt: fresh,
+			steps: []step{{
+				write: str(`{"timestamp":"` + freshTS + `","healthy":false,"unhealthy_reason":"XID_48","gpus":[{"gpu_uuid":"GPU-001"}]}`),
+				now:   fresh, want: impaired,
+			}},
+		},
+		{
+			name:      "connection lost reports INSUFFICIENT_DATA even when healthy",
+			createdAt: fresh,
+			steps: []step{{
+				write: str(`{"timestamp":"` + freshTS + `","healthy":true,"connection_lost":true,"gpus":[]}`),
+				now:   fresh, want: insufficient,
+			}},
+		},
+		{
+			name:      "connection lost takes precedence over unhealthy",
+			createdAt: fresh,
+			steps: []step{{
+				write: str(`{"timestamp":"` + freshTS + `","healthy":false,"unhealthy_reason":"XID_48","connection_lost":true,"gpus":[]}`),
+				now:   fresh, want: insufficient,
+			}},
+		},
+		{
+			name:      "stale timestamp reports INSUFFICIENT_DATA",
+			createdAt: fresh,
+			steps: []step{{
+				write: str(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"gpus":[]}`), // 5m old > 180s
+				now:   fresh, want: insufficient,
+			}},
+		},
+		{
+			name:      "future timestamp is treated as fresh (OK)",
+			createdAt: fresh,
+			steps: []step{{
+				write: str(`{"timestamp":"2099-01-01T00:00:00Z","healthy":true,"gpus":[]}`),
+				now:   fresh, want: ok,
+			}},
+		},
+		{
+			name:      "missing file: INITIALIZING within grace then INSUFFICIENT_DATA after",
+			createdAt: base,
+			steps: []step{
+				{now: graceWithin, want: initializing}, // no write: file never exists
+				{now: graceAfter, want: insufficient},
+			},
+		},
+		{
+			name:      "corrupt file: INITIALIZING within grace then INSUFFICIENT_DATA after",
+			createdAt: base,
+			steps: []step{
+				{write: str(`not valid json{{{`), now: graceWithin, want: initializing},
+				{now: graceAfter, want: insufficient},
+			},
+		},
+		{
+			name:      "empty file: INITIALIZING within grace then INSUFFICIENT_DATA after",
+			createdAt: base,
+			steps: []step{
+				{write: str(``), now: graceWithin, want: initializing},
+				{now: graceAfter, want: insufficient},
+			},
+		},
+		{
+			name:      "data loss after a real status is not masked by the boot grace",
+			createdAt: base,
+			steps: []step{
+				{write: str(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"gpus":[{"gpu_uuid":"GPU-001"}]}`), now: base, want: ok},
+				{remove: true, now: graceWithin, want: insufficient},
+			},
+		},
+		{
+			name:      "OK to IMPAIRED transition records previous status",
+			createdAt: base,
+			steps: []step{
+				{write: str(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"gpus":[]}`), now: base, want: ok},
+				{write: str(`{"timestamp":"2026-01-01T00:00:30Z","healthy":false,"unhealthy_reason":"XID_79","gpus":[]}`), now: base.Add(30 * time.Second), want: impaired, wantLast: last(ok)},
+			},
+		},
+		{
+			name:      "recovers from INSUFFICIENT_DATA back to OK (not latched)",
+			createdAt: base,
+			steps: []step{
+				{write: str(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"connection_lost":true,"gpus":[]}`), now: base, want: insufficient},
+				{write: str(`{"timestamp":"2026-01-01T00:00:30Z","healthy":true,"gpus":[]}`), now: base.Add(30 * time.Second), want: ok, wantLast: last(insufficient)},
+			},
+		},
+	}
 
-	// After the grace window: still no data flips to INSUFFICIENT_DATA.
-	timeNow = func() time.Time { return base.Add(gpuBootGracePeriod) }
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.RunCheck(),
-		"missing GPU data after the boot grace window must report INSUFFICIENT_DATA")
-}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := timeNow
+			defer func() { timeNow = original }()
 
-func TestGPUHealthcheckReportsInsufficientDataWhenFileMissing(t *testing.T) {
-	handler := gpu.NewDCGMMetricsReader("/nonexistent/gpu-metrics.json")
-	assertBootGraceThenInsufficientData(t, handler)
-}
+			filePath := filepath.Join(t.TempDir(), "gpu-metrics.json")
+			timeNow = func() time.Time { return tc.createdAt }
+			hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader(filePath))
 
-func TestGPUHealthcheckReportsInsufficientDataWhenFileCorrupt(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
+			for i, s := range tc.steps {
+				if s.write != nil {
+					require.NoError(t, os.WriteFile(filePath, []byte(*s.write), 0644), "step %d write", i)
+				}
+				if s.remove {
+					require.NoError(t, os.Remove(filePath), "step %d remove", i)
+				}
+				stepNow := s.now
+				timeNow = func() time.Time { return stepNow }
 
-	err := os.WriteFile(filePath, []byte(`not valid json{{{`), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	assertBootGraceThenInsufficientData(t, handler)
-}
-
-func TestGPUHealthcheckReportsInsufficientDataWhenFileEmpty(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	err := os.WriteFile(filePath, []byte(""), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	assertBootGraceThenInsufficientData(t, handler)
-}
-
-// After a first successful read, data loss reports INSUFFICIENT_DATA immediately
-// even within the boot grace: the grace covers only the initial INITIALIZING period.
-func TestGPUHealthcheckDataLossWithinGraceReportsInsufficientData(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	base, err := time.Parse(time.RFC3339, "2026-01-01T00:00:00Z")
-	require.NoError(t, err)
-	original := timeNow
-	timeNow = func() time.Time { return base }
-	defer func() { timeNow = original }()
-
-	err = os.WriteFile(filePath, []byte(`{
-		"timestamp": "2026-01-01T00:00:00Z",
-		"healthy": true,
-		"gpus": [{"gpu_uuid": "GPU-001"}]
-	}`), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	hc := NewGPUHealthcheck(handler)
-	require.Equal(t, ecstcs.InstanceHealthCheckStatusOk, hc.RunCheck())
-
-	// Delete the file and re-check while still inside the boot grace window:
-	// the loss of data after a real status must NOT be masked by the grace.
-	require.NoError(t, os.Remove(filePath))
-	timeNow = func() time.Time { return base.Add(gpuBootGracePeriod - time.Second) }
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.RunCheck(),
-		"data loss after a data-derived status must report INSUFFICIENT_DATA even within the boot grace window")
-}
-
-// connection_lost=true reports INSUFFICIENT_DATA even when healthy=true, since
-// dcgm-init leaves Healthy true while disconnected.
-func TestGPUHealthcheckReportsInsufficientDataWhenConnectionLost(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	err := os.WriteFile(filePath, []byte(`{
-		"timestamp": "2026-01-01T00:00:00Z",
-		"healthy": true,
-		"connection_lost": true,
-		"gpus": []
-	}`), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	hc := NewGPUHealthcheck(handler)
-	status := hc.RunCheck()
-
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status)
-}
-
-// A timestamp older than the staleness threshold reports INSUFFICIENT_DATA; a
-// future one is treated as fresh.
-func TestGPUHealthcheckTimestampStaleness(t *testing.T) {
-	t.Run("stale timestamp reports INSUFFICIENT_DATA", func(t *testing.T) {
-		filePath := filepath.Join(t.TempDir(), "gpu-metrics.json")
-		contents := `{"timestamp":"2000-01-01T00:00:00Z","healthy":true,"gpus":[]}`
-		require.NoError(t, os.WriteFile(filePath, []byte(contents), 0644))
-
-		hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader(filePath))
-		assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.RunCheck())
-	})
-
-	t.Run("future timestamp is not stale and reports OK", func(t *testing.T) {
-		filePath := filepath.Join(t.TempDir(), "gpu-metrics.json")
-		contents := `{"timestamp":"2099-01-01T00:00:00Z","healthy":true,"gpus":[]}`
-		require.NoError(t, os.WriteFile(filePath, []byte(contents), 0644))
-
-		hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader(filePath))
-		assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, hc.RunCheck())
-	})
-}
-
-// connection_lost=true takes precedence over healthy=false: RunCheck returns
-// INSUFFICIENT_DATA, not IMPAIRED.
-func TestGPUHealthcheckConnectionLostBeatsUnhealthy(t *testing.T) {
-	// Anchor timeNow near the file's timestamp so it is not stale.
-	base := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
-	original := timeNow
-	timeNow = func() time.Time { return base }
-	defer func() { timeNow = original }()
-
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	err := os.WriteFile(filePath, []byte(`{
-		"timestamp": "2026-01-01T00:00:00Z",
-		"healthy": false,
-		"unhealthy_reason": "XID_48",
-		"connection_lost": true,
-		"gpus": []
-	}`), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	hc := NewGPUHealthcheck(handler)
-	status := hc.RunCheck()
-
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, status,
-		"connection_lost must take precedence over an unhealthy report (INSUFFICIENT_DATA, not IMPAIRED)")
-}
-
-func TestGPUHealthcheckStatusTransition(t *testing.T) {
-	// Anchor timeNow to a fixed point so the file timestamps are within
-	// the staleness threshold.
-	base := time.Date(2026, 1, 1, 0, 1, 30, 0, time.UTC)
-	original := timeNow
-	timeNow = func() time.Time { return base }
-	defer func() { timeNow = original }()
-
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	err := os.WriteFile(filePath, []byte(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"gpus":[]}`), 0644)
-	require.NoError(t, err)
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	hc := NewGPUHealthcheck(handler)
-	status := hc.RunCheck()
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, status)
-
-	// Transition to unhealthy
-	err = os.WriteFile(filePath, []byte(`{"timestamp":"2026-01-01T00:01:00Z","healthy":false,"unhealthy_reason":"XID_79","gpus":[]}`), 0644)
-	require.NoError(t, err)
-
-	status = hc.RunCheck()
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusImpaired, status)
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, hc.GetLastHealthcheckStatus())
-}
-
-// TestGPUHealthcheckRecoversFromInsufficientData verifies the check is not
-// latched: after INSUFFICIENT_DATA, a fresh healthy sample flips it back to OK.
-func TestGPUHealthcheckRecoversFromInsufficientData(t *testing.T) {
-	// Anchor timeNow so the file timestamps are within the staleness threshold.
-	base := time.Date(2026, 1, 1, 0, 1, 30, 0, time.UTC)
-	original := timeNow
-	timeNow = func() time.Time { return base }
-	defer func() { timeNow = original }()
-
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "gpu-metrics.json")
-
-	handler := gpu.NewDCGMMetricsReader(filePath)
-	hc := NewGPUHealthcheck(handler)
-
-	// First: connection lost -> INSUFFICIENT_DATA.
-	err := os.WriteFile(filePath, []byte(`{"timestamp":"2026-01-01T00:00:00Z","healthy":true,"connection_lost":true,"gpus":[]}`), 0644)
-	require.NoError(t, err)
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.RunCheck())
-
-	// Then: a fresh, connected, healthy sample must recover to OK.
-	err = os.WriteFile(filePath, []byte(`{"timestamp":"2026-01-01T00:01:00Z","healthy":true,"gpus":[]}`), 0644)
-	require.NoError(t, err)
-	status := hc.RunCheck()
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusOk, status)
-	assert.Equal(t, ecstcs.InstanceHealthCheckStatusInsufficientData, hc.GetLastHealthcheckStatus())
+				assert.Equal(t, s.want, hc.RunCheck(), "step %d status", i)
+				if s.wantLast != nil {
+					assert.Equal(t, *s.wantLast, hc.GetLastHealthcheckStatus(), "step %d last status", i)
+				}
+			}
+		})
+	}
 }
