@@ -1,5 +1,3 @@
-//go:build unit && linux
-
 // Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
@@ -12,6 +10,8 @@
 // on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
 // express or implied. See the License for the specific language governing
 // permissions and limitations under the License.
+
+//go:build unit && linux
 
 package doctor
 
@@ -27,6 +27,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	ok           = ecstcs.InstanceHealthCheckStatusOk
+	impaired     = ecstcs.InstanceHealthCheckStatusImpaired
+	insufficient = ecstcs.InstanceHealthCheckStatusInsufficientData
+	initializing = ecstcs.InstanceHealthCheckStatusInitializing
+)
+
 func TestGPUHealthcheckType(t *testing.T) {
 	hc := NewGPUHealthcheck(gpu.NewDCGMMetricsReader("/nonexistent/gpu-metrics.json"))
 	assert.Equal(t, ecstcs.InstanceHealthCheckTypeAcceleratedCompute, hc.GetHealthcheckType())
@@ -39,12 +46,14 @@ func TestGPUHealthcheckType(t *testing.T) {
 // so every file timestamp has a deterministic age relative to the staleness
 // threshold, and createdAt fixes the boot-grace origin.
 func TestGPUHealthcheckRunCheck(t *testing.T) {
-	const (
-		ok           = ecstcs.InstanceHealthCheckStatusOk
-		impaired     = ecstcs.InstanceHealthCheckStatusImpaired
-		insufficient = ecstcs.InstanceHealthCheckStatusInsufficientData
-		initializing = ecstcs.InstanceHealthCheckStatusInitializing
-	)
+	type step struct {
+		write    *string // rewrite the metrics file before the check
+		remove   bool    // remove the metrics file before the check
+		now      time.Time
+		want     ecstcs.InstanceHealthCheckStatus
+		wantLast *ecstcs.InstanceHealthCheckStatus // optional GetLastHealthcheckStatus assertion
+	}
+
 	str := func(s string) *string { return &s }
 	last := func(s ecstcs.InstanceHealthCheckStatus) *ecstcs.InstanceHealthCheckStatus { return &s }
 
@@ -56,14 +65,6 @@ func TestGPUHealthcheckRunCheck(t *testing.T) {
 	// fresh anchors the single-read cases; freshTS is an age-0 file timestamp.
 	fresh := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
 	const freshTS = "2026-01-01T00:05:00Z"
-
-	type step struct {
-		write    *string // rewrite the metrics file before the check
-		remove   bool    // remove the metrics file before the check
-		now      time.Time
-		want     ecstcs.InstanceHealthCheckStatus
-		wantLast *ecstcs.InstanceHealthCheckStatus // optional GetLastHealthcheckStatus assertion
-	}
 
 	testCases := []struct {
 		name      string
