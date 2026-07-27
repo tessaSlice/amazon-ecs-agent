@@ -556,11 +556,10 @@ func TestStartMetricsPublish(t *testing.T) {
 				telemetryMessage := <-telemetryMessages
 				tickNum := i - 1 // tick 1=first ticker fire, etc.
 				if tc.gpuEnabled && tickNum%defaultPublishGPUMetricsTicker == 0 {
-					assert.NotNil(t, telemetryMessage.InstanceMetrics, "tick %d should carry GPU InstanceMetrics (every %d ticks)", tickNum, defaultPublishGPUMetricsTicker)
-					if telemetryMessage.InstanceMetrics != nil {
-						assert.NotEmpty(t, telemetryMessage.InstanceMetrics.GeneralMetricsPayload,
-							"tick %d GPU InstanceMetrics should carry GeneralMetricsPayload", tickNum)
-					}
+					require.NotNil(t, telemetryMessage.InstanceMetrics,
+						"tick %d should carry GPU InstanceMetrics (every %d ticks)", tickNum, defaultPublishGPUMetricsTicker)
+					require.NotEmpty(t, telemetryMessage.InstanceMetrics.GeneralMetricsPayload,
+						"tick %d GPU InstanceMetrics should carry GeneralMetricsPayload", tickNum)
 				} else {
 					assert.Nil(t, telemetryMessage.InstanceMetrics, "tick %d should not carry GPU InstanceMetrics", tickNum)
 				}
