@@ -136,7 +136,7 @@ func (c *gpuMetricsCollector) setReaderUnsafe(reader gpuMetricsReader) {
 // Engine defines methods to be implemented by the engine struct. It is
 // defined to make testing easier.
 type Engine interface {
-	GetInstanceMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error)
+	GetPublishMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error)
 	ContainerDockerStats(taskARN string, containerID string) (*types.StatsJSON, *stats.NetworkStatsPerSec, error)
 	GetTaskHealthMetrics() (*ecstcs.HealthMetadata, []*ecstcs.TaskHealth, error)
 	GetPublishServiceConnectTickerInterval() int32
@@ -520,21 +520,12 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 	engine.publishHealth()
 
 	for {
-		var includeServiceConnectStats bool
-		serviceConnectCounter := engine.GetPublishServiceConnectTickerInterval()
-		serviceConnectCounter++
-		if serviceConnectCounter == defaultPublishServiceConnectTicker {
-			includeServiceConnectStats = true
-			serviceConnectCounter = 0
-		}
+		serviceConnectCounter, includeServiceConnectStats :=
+			advancePublishTicker(engine.GetPublishServiceConnectTickerInterval(), defaultPublishServiceConnectTicker)
 		engine.SetPublishServiceConnectTickerInterval(serviceConnectCounter)
-		var includeGPUMetrics bool
-		gpuMetricCounter := engine.GetPublishGPUMetricsTickerInterval()
-		gpuMetricCounter++
-		if gpuMetricCounter == defaultPublishGPUMetricsTicker {
-			includeGPUMetrics = true
-			gpuMetricCounter = 0
-		}
+
+		gpuMetricCounter, includeGPUMetrics :=
+			advancePublishTicker(engine.GetPublishGPUMetricsTickerInterval(), defaultPublishGPUMetricsTicker)
 		engine.SetPublishGPUMetricsTickerInterval(gpuMetricCounter)
 		select {
 		case <-engine.publishMetricsTicker.C:
@@ -553,10 +544,23 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 	}
 }
 
+// advancePublishTicker advances a per-metric publish counter by one tick and
+// reports whether this tick should include that metric. When the counter
+// reaches limit it wraps back to 0 and include is true; otherwise the
+// incremented counter is returned with include false. Shared by the Service
+// Connect and GPU publish cadences in StartMetricsPublish.
+func advancePublishTicker(counter, limit int32) (next int32, include bool) {
+	counter++
+	if counter == limit {
+		return 0, true
+	}
+	return counter, false
+}
+
 func (engine *DockerStatsEngine) publishMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) {
 	publishMetricsCtx, cancel := context.WithTimeout(engine.ctx, publishMetricsTimeout)
 	defer cancel()
-	metricsMetadata, taskMetrics, instanceMetrics, metricsErr := engine.GetInstanceMetrics(includeServiceConnectStats, includeGPUMetrics)
+	metricsMetadata, taskMetrics, instanceMetrics, metricsErr := engine.GetPublishMetrics(includeServiceConnectStats, includeGPUMetrics)
 	if metricsErr == nil {
 		metricsMessage := ecstcs.TelemetryMessage{
 			InstanceMetrics: instanceMetrics,
@@ -594,8 +598,8 @@ func (engine *DockerStatsEngine) publishHealth() {
 	}
 }
 
-// GetInstanceMetrics gets all task metrics, instance metadata, and instance metrics from stats engine.
-func (engine *DockerStatsEngine) GetInstanceMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
+// GetPublishMetrics gets all task metrics, instance metadata, and instance metrics from stats engine.
+func (engine *DockerStatsEngine) GetPublishMetrics(includeServiceConnectStats bool, includeGPUMetrics bool) (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, *ecstcs.InstanceMetrics, error) {
 	var instanceMetrics *ecstcs.InstanceMetrics
 	idle := engine.isIdle()
 	metricsMetadata := &ecstcs.MetricsMetadata{
@@ -918,7 +922,7 @@ func (engine *DockerStatsEngine) taskContainerMetricsUnsafe(taskArn string, gpuM
 		// Check if the container is terminal. If it is, make sure that it is
 		// cleaned up properly. We might sometimes miss events from docker task
 		// engine and this helps in reconciling the state. The tcs client's
-		// GetInstanceMetrics probe is used as the trigger for this.
+		// GetPublishMetrics probe is used as the trigger for this.
 		if engine.stopTrackingContainerUnsafe(container, taskArn) {
 			continue
 		}
