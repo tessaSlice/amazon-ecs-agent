@@ -520,13 +520,7 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 	engine.publishHealth()
 
 	for {
-		serviceConnectCounter, includeServiceConnectStats :=
-			advancePublishTicker(engine.GetPublishServiceConnectTickerInterval(), defaultPublishServiceConnectTicker)
-		engine.SetPublishServiceConnectTickerInterval(serviceConnectCounter)
-
-		gpuMetricCounter, includeGPUMetrics :=
-			advancePublishTicker(engine.GetPublishGPUMetricsTickerInterval(), defaultPublishGPUMetricsTicker)
-		engine.SetPublishGPUMetricsTickerInterval(gpuMetricCounter)
+		includeServiceConnectStats, includeGPUMetrics := engine.advancePublishTickers()
 		select {
 		case <-engine.publishMetricsTicker.C:
 			seelog.Debugf("publishMetricsTicker triggered. Sending telemetry messages to tcsClient through channel")
@@ -544,11 +538,27 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 	}
 }
 
-// advancePublishTicker advances a publish counter one tick, returning the next
-// counter and whether this tick includes the metric: on reaching limit it wraps
-// to 0 with include=true, else returns the incremented counter with include=false.
-// Shared by the Service Connect and GPU cadences in StartMetricsPublish.
-func advancePublishTicker(counter, limit int32) (next int32, include bool) {
+// advancePublishTickers advances the Service Connect and GPU publish counters
+// by one tick and reports whether this tick should include each metric. Each
+// counter is incremented and, on reaching its interval, wraps back to 0 with
+// its include flag set true; otherwise the incremented counter is persisted and
+// the flag is false.
+func (engine *DockerStatsEngine) advancePublishTickers() (includeServiceConnectStats, includeGPUMetrics bool) {
+	serviceConnectCounter, includeServiceConnectStats := advancePublishCounter(
+		engine.GetPublishServiceConnectTickerInterval(), defaultPublishServiceConnectTicker)
+	engine.SetPublishServiceConnectTickerInterval(serviceConnectCounter)
+
+	gpuCounter, includeGPUMetrics := advancePublishCounter(
+		engine.GetPublishGPUMetricsTickerInterval(), defaultPublishGPUMetricsTicker)
+	engine.SetPublishGPUMetricsTickerInterval(gpuCounter)
+
+	return includeServiceConnectStats, includeGPUMetrics
+}
+
+// advancePublishCounter advances a publish counter one tick: on reaching limit
+// it wraps to 0 and returns include=true, else returns the incremented counter
+// with include=false.
+func advancePublishCounter(counter, limit int32) (next int32, include bool) {
 	counter++
 	if counter == limit {
 		return 0, true
