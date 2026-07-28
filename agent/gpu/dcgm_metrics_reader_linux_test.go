@@ -86,12 +86,10 @@ const (
 	testT4Xid       = int64(2)
 )
 
-// TestDCGMMetricsReaderValidFile parses healthy snapshots of varying shape and
-// verifies the whole struct round-trips through the file. A single deep-equal
-// per case replaces field-by-field assertions: for any valid input the reader
-// returns exactly what was written. Covers a single fully populated GPU, a
-// four-GPU host, a fractional vGPU with absent optional fields, a
-// connection-lost snapshot, and an unhealthy snapshot.
+// TestDCGMMetricsReaderValidFile verifies healthy snapshots round-trip through
+// the file: one deep-equal per case asserts the reader returns exactly what was
+// written. Covers a fully populated GPU, four GPUs, a fractional vGPU with absent
+// optional fields, connection-lost, and unhealthy.
 func TestDCGMMetricsReaderValidFile(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -212,12 +210,10 @@ func TestDCGMMetricsReaderValidFile(t *testing.T) {
 	}
 }
 
-// TestDCGMMetricsReaderRejectsAbsentFile covers every case where os.ReadFile
-// itself fails, so the reader returns nil before parsing: a missing parent
-// directory, a missing file in an existing directory (the common pre-first-write
-// transient once the bind mount exists), the path being a directory (EISDIR), a
-// non-directory parent path component (ENOTDIR), and an unreadable file (no read
-// permission). Each case's setup returns the path to read.
+// TestDCGMMetricsReaderRejectsAbsentFile covers cases where os.ReadFile fails, so
+// the reader returns nil before parsing: missing parent dir, missing file in an
+// existing dir (the common pre-first-write transient), path is a dir (EISDIR),
+// non-dir parent (ENOTDIR), and an unreadable file. Each setup returns the path.
 func TestDCGMMetricsReaderRejectsAbsentFile(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -272,11 +268,10 @@ func TestDCGMMetricsReaderRejectsAbsentFile(t *testing.T) {
 	}
 }
 
-// TestDCGMMetricsReaderRejectsCorruptFile covers files that read successfully but
-// whose contents are rejected: non-JSON bytes, an empty or whitespace-only file
-// (dcgm-init's pre-first-write state), a wrong-typed field, a top-level array, a
-// literal null, and valid JSON with an unparseable timestamp. All must return
-// nil rather than a partial or zero-value result.
+// TestDCGMMetricsReaderRejectsCorruptFile covers files that read but whose
+// contents are rejected: non-JSON bytes, empty/whitespace (dcgm-init's
+// pre-first-write state), a wrong-typed field, a top-level array, literal null,
+// and an unparseable timestamp. All must return nil, not a partial result.
 func TestDCGMMetricsReaderRejectsCorruptFile(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -300,9 +295,9 @@ func TestDCGMMetricsReaderRejectsCorruptFile(t *testing.T) {
 	}
 }
 
-// TestDCGMMetricsReaderReturnsTimestamp verifies that the reader returns the
-// timestamp from the file so callers can detect stale data, and that repeated
-// calls return the same data (the reader itself tracks no staleness).
+// TestDCGMMetricsReaderReturnsTimestamp verifies the reader returns the file's
+// timestamp (so callers can detect stale data) and that repeated calls return
+// the same data (the reader tracks no staleness itself).
 func TestDCGMMetricsReaderReturnsTimestamp(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "gpu-metrics.json")

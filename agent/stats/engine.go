@@ -544,11 +544,10 @@ func (engine *DockerStatsEngine) StartMetricsPublish() {
 	}
 }
 
-// advancePublishTicker advances a per-metric publish counter by one tick and
-// reports whether this tick should include that metric. When the counter
-// reaches limit it wraps back to 0 and include is true; otherwise the
-// incremented counter is returned with include false. Shared by the Service
-// Connect and GPU publish cadences in StartMetricsPublish.
+// advancePublishTicker advances a publish counter one tick, returning the next
+// counter and whether this tick includes the metric: on reaching limit it wraps
+// to 0 with include=true, else returns the incremented counter with include=false.
+// Shared by the Service Connect and GPU cadences in StartMetricsPublish.
 func advancePublishTicker(counter, limit int32) (next int32, include bool) {
 	counter++
 	if counter == limit {
