@@ -23,7 +23,7 @@ updates:
   directory: "/dcgm-init"
   schedule:
     interval: weekly
-    time: "05:00"
+    time: "00:00"
   open-pull-requests-limit: 1
   target-branch: "dev"
 - package-ecosystem: "github-actions"
