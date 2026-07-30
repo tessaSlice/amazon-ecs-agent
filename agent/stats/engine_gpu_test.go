@@ -220,48 +220,102 @@ func requireNoContainerGPUPayload(t *testing.T, taskMetrics []*ecstcs.TaskMetric
 	assertNoGPUPayloads(t, taskMetrics)
 }
 
-// TestGetPublishMetricsEmitsInstanceGPUMetrics: an emitting tick with fresh
-// data emits both scopes — the instance payload (limit = GPUs on host,
-// usage = unique assigned GPU IDs) and a container payload restricted to the
-// container's assigned devices.
-func TestGetPublishMetricsEmitsInstanceGPUMetrics(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	// One of the host's two GPUs is assigned to the running container.
-	engine, cancel := setupGPUStatsEngine(t, mockCtrl, []string{"GPU-1"})
-	defer cancel()
-
-	fake := &fakeDCGMMetricsReader{data: &gputypes.GPUMetricsFileData{
-		Timestamp: "2026-07-19T00:00:00Z",
-		Healthy:   true,
-		GPUs: []gputypes.GPUMetric{
-			{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
-			{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(10.0)},
+// TestGetPublishMetricsGPUPayloads pins what an emitting tick with fresh data
+// puts on the wire at both scopes. Instance limit counts the reader's devices
+// and usage counts unique assigned IDs (from container state, not the
+// snapshot); the container payload is restricted to assigned devices that have
+// a reading.
+func TestGetPublishMetricsGPUPayloads(t *testing.T) {
+	testCases := []struct {
+		name string
+		// gpuIDs are assigned to the container; snapshotGPUs are what the
+		// reader reports for the host.
+		gpuIDs               []string
+		snapshotGPUs         []gputypes.GPUMetric
+		wantInstanceLimit    int64
+		wantInstanceUsage    int64
+		wantContainerDevices []string // nil means no container payload at all
+		wantAbsentDevices    []string
+	}{
+		{
+			name:   "assigned subset of host GPUs emits both scopes",
+			gpuIDs: []string{"GPU-1"},
+			snapshotGPUs: []gputypes.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(10.0)},
+			},
+			wantInstanceLimit:    2,
+			wantInstanceUsage:    1,
+			wantContainerDevices: []string{"GPU-1"},
+			wantAbsentDevices:    []string{"GPU-2"},
 		},
-	}}
-	engine.SetGPUMetricsReader(fake)
+		{
+			// GPU-9 is assigned but absent from the snapshot: skipped silently,
+			// with no empty wrapper. It still counts toward instance usage.
+			name:   "assigned device with no reading is skipped",
+			gpuIDs: []string{"GPU-1", "GPU-3", "GPU-9"},
+			snapshotGPUs: []gputypes.GPUMetric{
+				{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
+				{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(10.0)},
+				{GPUUUID: "GPU-3", GPUUtilization: aws.Float64(75.0)},
+			},
+			wantInstanceLimit:    3,
+			wantInstanceUsage:    3,
+			wantContainerDevices: []string{"GPU-1", "GPU-3"},
+			wantAbsentDevices:    []string{"GPU-2", "GPU-9"},
+		},
+		{
+			name:              "no assigned GPUs emits instance scope only",
+			gpuIDs:            nil,
+			snapshotGPUs:      []gputypes.GPUMetric{{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(25.0)}},
+			wantInstanceLimit: 1,
+			wantInstanceUsage: 0,
+		},
+	}
 
-	feedFakeStats(engine)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
 
-	metadata, taskMetrics, instanceMetrics, err := engine.GetPublishMetrics(false, true)
-	require.NoError(t, err)
-	require.NotNil(t, metadata)
-	require.Len(t, taskMetrics, 1)
+			engine, cancel := setupGPUStatsEngine(t, mockCtrl, tc.gpuIDs)
+			defer cancel()
 
-	requireInstanceGPUPayload(t, instanceMetrics, 2 /* GPUs on host */, 1 /* unique assigned */)
+			fake := &fakeDCGMMetricsReader{data: &gputypes.GPUMetricsFileData{
+				Timestamp: "2026-07-19T00:00:00Z",
+				Healthy:   true,
+				GPUs:      tc.snapshotGPUs,
+			}}
+			engine.SetGPUMetricsReader(fake)
 
-	// Container scope: only assigned GPU-1 appears; CPU/memory ride along.
-	require.Len(t, taskMetrics[0].ContainerMetrics, 1)
-	cm := taskMetrics[0].ContainerMetrics[0]
-	requireContainerGPUPayload(t, cm, []string{"GPU-1"})
-	// Unassigned GPU-2 must not leak in.
-	assert.NotContains(t, containerGPUPayloadDeviceIDs(cm), "GPU-2",
-		"unassigned host GPU must not leak into the container payload")
-	assert.NotNil(t, cm.CpuStatsSet)
-	assert.NotNil(t, cm.MemoryStatsSet)
+			feedFakeStats(engine)
 
-	assert.GreaterOrEqual(t, fake.reads, 1, "engine should have queried the DCGM metrics reader")
+			metadata, taskMetrics, instanceMetrics, err := engine.GetPublishMetrics(false, true)
+			require.NoError(t, err)
+			require.NotNil(t, metadata)
+
+			requireInstanceGPUPayload(t, instanceMetrics, tc.wantInstanceLimit, tc.wantInstanceUsage)
+
+			if tc.wantContainerDevices == nil {
+				// No container payload, but CPU/memory must be unaffected.
+				requireNoContainerGPUPayload(t, taskMetrics)
+				return
+			}
+
+			require.Len(t, taskMetrics, 1)
+			require.Len(t, taskMetrics[0].ContainerMetrics, 1)
+			cm := taskMetrics[0].ContainerMetrics[0]
+			requireContainerGPUPayload(t, cm, tc.wantContainerDevices)
+			gotDeviceIDs := containerGPUPayloadDeviceIDs(cm)
+			for _, absent := range tc.wantAbsentDevices {
+				assert.NotContains(t, gotDeviceIDs, absent,
+					"device %s is unassigned or has no reading; it must not produce a wrapper", absent)
+			}
+			assert.NotNil(t, cm.CpuStatsSet)
+			assert.NotNil(t, cm.MemoryStatsSet)
+			assert.GreaterOrEqual(t, fake.reads, 1, "engine should have queried the DCGM metrics reader")
+		})
+	}
 }
 
 // TestGetPublishMetricsSkipsStaleGPUMetrics: an unchanged reader Timestamp
@@ -352,79 +406,6 @@ func TestGPUMetricsEmittedOnlyWhenFlagSet(t *testing.T) {
 	}
 }
 
-// TestGetPublishMetricsContainerGPUMetricsFiltering pins the container-scope
-// filtering: one wrapper per assigned device in reader order; assigned
-// devices absent from the snapshot are skipped silently (no empty wrapper).
-func TestGetPublishMetricsContainerGPUMetricsFiltering(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	// GPU-9 is assigned but has no reading in the snapshot.
-	engine, cancel := setupGPUStatsEngine(t, mockCtrl, []string{"GPU-1", "GPU-3", "GPU-9"})
-	defer cancel()
-
-	fake := &fakeDCGMMetricsReader{data: &gputypes.GPUMetricsFileData{
-		Timestamp: "2026-07-19T00:00:00Z",
-		Healthy:   true,
-		GPUs: []gputypes.GPUMetric{
-			{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(50.0)},
-			{GPUUUID: "GPU-2", GPUUtilization: aws.Float64(10.0)}, // on host, not assigned
-			{GPUUUID: "GPU-3", GPUUtilization: aws.Float64(75.0)},
-		},
-	}}
-	engine.SetGPUMetricsReader(fake)
-
-	feedFakeStats(engine)
-
-	_, taskMetrics, instanceMetrics, err := engine.GetPublishMetrics(false, true)
-	require.NoError(t, err)
-	require.Len(t, taskMetrics, 1)
-	require.Len(t, taskMetrics[0].ContainerMetrics, 1)
-
-	// Container scope: wrappers for GPU-1 and GPU-3 only, in reader order.
-	cm := taskMetrics[0].ContainerMetrics[0]
-	requireContainerGPUPayload(t, cm, []string{"GPU-1", "GPU-3"})
-
-	// GPU-2 (unassigned) and GPU-9 (no reading) must not appear.
-	gotDeviceIDs := containerGPUPayloadDeviceIDs(cm)
-	assert.NotContains(t, gotDeviceIDs, "GPU-2",
-		"unassigned host GPU must not leak into the container payload")
-	assert.NotContains(t, gotDeviceIDs, "GPU-9",
-		"assigned device with no reading must not produce a wrapper")
-
-	// Instance scope: limit = the reader's 3 devices; usage = 3 unique
-	// assigned IDs (incl. GPU-9 — assignment counting comes from container
-	// state, not the snapshot).
-	requireInstanceGPUPayload(t, instanceMetrics, 3, 3)
-}
-
-// TestGetPublishMetricsNoContainerGPUPayloadWithoutAssignment: a container
-// with no assigned GPUs carries no payload even when the host has GPUs.
-func TestGetPublishMetricsNoContainerGPUPayloadWithoutAssignment(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	engine, cancel := setupGPUStatsEngine(t, mockCtrl, nil)
-	defer cancel()
-
-	fake := &fakeDCGMMetricsReader{data: &gputypes.GPUMetricsFileData{
-		Timestamp: "2026-07-19T00:00:00Z",
-		Healthy:   true,
-		GPUs:      []gputypes.GPUMetric{{GPUUUID: "GPU-1", GPUUtilization: aws.Float64(25.0)}},
-	}}
-	engine.SetGPUMetricsReader(fake)
-
-	feedFakeStats(engine)
-
-	_, taskMetrics, instanceMetrics, err := engine.GetPublishMetrics(false, true)
-	require.NoError(t, err)
-
-	// Instance scope still emits: the host has a GPU, none assigned.
-	requireInstanceGPUPayload(t, instanceMetrics, 1, 0)
-	// No container payload; CPU/memory unaffected.
-	requireNoContainerGPUPayload(t, taskMetrics)
-}
-
 // TestGetPublishMetricsSuppressesGPUForUnusableSnapshot verifies that GPU
 // metrics are suppressed at both scopes when the reader's snapshot is unusable
 // (connection lost, nil, or no GPU entries) and emitted normally when it is
@@ -437,6 +418,9 @@ func TestGetPublishMetricsSuppressesGPUForUnusableSnapshot(t *testing.T) {
 		expectGPUEmit bool
 	}{
 		{
+			// Also the ECS_DISABLE_METRICS path: that flag leaves the reader nil
+			// at construction (see TestGPUMetricsReaderFollowsDisableMetrics), so
+			// this case covers its emission behaviour at both scopes.
 			name:          "no reader wired up suppresses GPU",
 			reader:        nil,
 			expectGPUEmit: false,
@@ -513,23 +497,34 @@ func TestGetPublishMetricsSuppressesGPUForUnusableSnapshot(t *testing.T) {
 
 // TestGPUMetricsReaderFollowsDisableMetrics pins the construction-time gate:
 // the reader is wired up only when GPU support is on and ECS_DISABLE_METRICS is
-// off, so the disabled path costs nothing per tick.
+// off, so the disabled path costs nothing per tick. Cases that expect no reader
+// also run a publish tick end to end, confirming nothing reaches TACS at either
+// scope. The Service Connect variant matters: an SC task keeps the engine
+// non-idle, so GetPublishMetrics reaches the GPU block a nil reader shuts down.
 func TestGPUMetricsReaderFollowsDisableMetrics(t *testing.T) {
 	testCases := []struct {
-		name              string
-		gpuSupportEnabled bool
-		disableMetrics    bool
-		expectReader      bool
+		name                  string
+		gpuSupportEnabled     bool
+		disableMetrics        bool
+		serviceConnectEnabled bool
+		expectReader          bool
 	}{
 		{
 			name:              "GPU support on and metrics enabled wires up the reader",
 			gpuSupportEnabled: true,
+			disableMetrics:    false,
 			expectReader:      true,
 		},
 		{
 			name:              "metrics disabled leaves the reader nil",
 			gpuSupportEnabled: true,
 			disableMetrics:    true,
+		},
+		{
+			name:                  "metrics disabled leaves the reader nil with a Service Connect task",
+			gpuSupportEnabled:     true,
+			disableMetrics:        true,
+			serviceConnectEnabled: true,
 		},
 		{
 			name:              "GPU support off leaves the reader nil",
@@ -540,59 +535,38 @@ func TestGPUMetricsReaderFollowsDisableMetrics(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
+
 			engineCfg := cfg
 			engineCfg.GPUSupportEnabled = tc.gpuSupportEnabled
 			if tc.disableMetrics {
 				engineCfg.DisableMetrics = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
 			}
 
-			engine := NewDockerStatsEngine(&engineCfg, nil, eventStream(t.Name()), nil, nil, nil)
+			engine, cancel := setupGPUStatsEngineWithConfig(t, mockCtrl, []string{"GPU-1"},
+				&engineCfg, tc.serviceConnectEnabled)
+			defer cancel()
 
 			if tc.expectReader {
 				assert.NotNil(t, engine.gpuCollector.reader)
-			} else {
-				assert.Nil(t, engine.gpuCollector.reader)
+				return
 			}
-		})
-	}
-}
+			require.Nil(t, engine.gpuCollector.reader)
 
-// TestGetPublishMetricsSuppressesGPUWhenMetricsDisabled: with
-// ECS_DISABLE_METRICS set, no GPU payload reaches TACS at either scope. The
-// Service Connect case is the one that matters — an SC task keeps the engine
-// non-idle and forces includeServiceConnectStats, so GetPublishMetrics reaches
-// the GPU block that a nil reader now shuts down.
-func TestGetPublishMetricsSuppressesGPUWhenMetricsDisabled(t *testing.T) {
-	for _, serviceConnectEnabled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("serviceConnectEnabled=%v", serviceConnectEnabled), func(t *testing.T) {
-			mockCtrl := gomock.NewController(t)
-			defer mockCtrl.Finish()
-
-			engineCfg := cfg
-			engineCfg.GPUSupportEnabled = true
-			engineCfg.DisableMetrics = config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled}
-
-			engine, cancel := setupGPUStatsEngineWithConfig(t, mockCtrl, []string{"GPU-1"},
-				&engineCfg, serviceConnectEnabled)
-			defer cancel()
-
-			// No SetGPUMetricsReader: the construction-time gate is what is under
-			// test, and injecting a reader would route around it.
-			require.Nil(t, engine.gpuCollector.reader,
-				"reader must stay nil when metrics are disabled")
-
+			// A nil reader must also produce no GPU payload on the wire. No
+			// SetGPUMetricsReader here: injecting one would route around the
+			// construction-time gate under test.
 			feedFakeStats(engine)
-
-			// Both flags true: the counters advance in lockstep, so every 3rd
-			// tick sets both.
+			// Both flags true: the tick counters advance in lockstep, so every
+			// 3rd tick sets both.
 			_, taskMetrics, instanceMetrics, err := engine.GetPublishMetrics(
-				serviceConnectEnabled, true)
+				tc.serviceConnectEnabled, true)
 			if err != nil {
 				require.ErrorIs(t, err, EmptyMetricsError)
 			}
-
 			assert.Nil(t, instanceMetrics,
-				"instance GPU payload must not be emitted when metrics are disabled")
+				"instance GPU payload must not be emitted without a reader")
 			assertNoGPUPayloads(t, taskMetrics)
 		})
 	}
