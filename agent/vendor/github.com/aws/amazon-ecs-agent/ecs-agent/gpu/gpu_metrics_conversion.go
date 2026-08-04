@@ -21,15 +21,17 @@ import (
 
 // GPU metric names as they appear in the TACS GeneralMetric payload.
 const (
-	gpuMetricNameGPUUtilization        = "GPUUtilization"
-	gpuMetricNameGPUMemoryUtilization  = "GPUMemoryUtilization"
-	gpuMetricNameGPUMemoryTotal        = "GPUMemoryTotal"
-	gpuMetricNameGPUMemoryUsed         = "GPUMemoryUsed"
-	gpuMetricNameGPUPowerDraw          = "GPUPowerDraw"
-	gpuMetricNameGPUTemperature        = "GPUTemperature"
-	gpuMetricNameInstanceGPULimitCount = "InstanceGPULimit"
-	gpuMetricNameInstanceGPUUsageTotal = "InstanceGPUUsageTotal"
-	gpuMetricNameGPURestartAppXidCount = "GPURestartAppXidCount"
+	gpuMetricNameGPUUtilization           = "GPUUtilization"
+	gpuMetricNameGPUMemoryUtilization     = "GPUMemoryUtilization"
+	gpuMetricNameGPUMemoryTotal           = "GPUMemoryTotal"
+	gpuMetricNameGPUMemoryUsed            = "GPUMemoryUsed"
+	gpuMetricNameGPUPowerDraw             = "GPUPowerDraw"
+	gpuMetricNameGPUTemperature           = "GPUTemperature"
+	gpuMetricNameGPUTensorCoreUtilization = "GPUTensorCoreUtilization"
+	gpuMetricNameGPUSMActive              = "GPUSMActive"
+	gpuMetricNameInstanceGPULimitCount    = "InstanceGPULimit"
+	gpuMetricNameInstanceGPUUsageTotal    = "InstanceGPUUsageTotal"
+	gpuMetricNameGPURestartAppXidCount    = "GPURestartAppXidCount"
 )
 
 // GPU metric units matching CloudWatch unit conventions.
@@ -90,6 +92,20 @@ func GPUMetricToGeneralMetricsWrapper(m gputypes.GPUMetric) *ecstcs.GeneralMetri
 			MetricName:        aws.String(gpuMetricNameGPUTemperature),
 			MetricValueDouble: m.Temperature,
 			Unit:              aws.String(gpuMetricUnitNone),
+		})
+	}
+	if m.TensorCoreUtilization != nil {
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:        aws.String(gpuMetricNameGPUTensorCoreUtilization),
+			MetricValueDouble: m.TensorCoreUtilization,
+			Unit:              aws.String(gpuMetricUnitPercent),
+		})
+	}
+	if m.SMActive != nil {
+		generalMetrics = append(generalMetrics, &ecstcs.GeneralMetric{
+			MetricName:        aws.String(gpuMetricNameGPUSMActive),
+			MetricValueDouble: m.SMActive,
+			Unit:              aws.String(gpuMetricUnitPercent),
 		})
 	}
 	if len(generalMetrics) == 0 {

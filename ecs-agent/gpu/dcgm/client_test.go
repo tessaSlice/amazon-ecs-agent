@@ -1976,6 +1976,96 @@ func TestExtractMetricsFromFieldValues(t *testing.T) {
 	}
 }
 
+func TestExtractProfMetricsFromFieldValues(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name            string
+		values          []dcgm.FieldValue_v1
+		expectedMetric  gputypes.GPUMetric
+		expectedSkipped []string
+	}{
+		{
+			name: "all valid profiling fields",
+			values: []dcgm.FieldValue_v1{
+				makeFloat64FieldValue(0, 0.65), // SM Active: 65%
+				makeFloat64FieldValue(0, 0.40), // Tensor Core: 40%
+			},
+			expectedMetric: gputypes.GPUMetric{
+				SMActive:              ptrFloat64(65.0),
+				TensorCoreUtilization: ptrFloat64(40.0),
+			},
+		},
+		{
+			name: "zero ratios produce zero percent",
+			values: []dcgm.FieldValue_v1{
+				makeFloat64FieldValue(0, 0.0), // SM Active: 0%
+				makeFloat64FieldValue(0, 0.0), // Tensor Core: 0%
+			},
+			expectedMetric: gputypes.GPUMetric{
+				SMActive:              ptrFloat64(0.0),
+				TensorCoreUtilization: ptrFloat64(0.0),
+			},
+		},
+		{
+			name: "profiling not supported fields are skipped",
+			values: []dcgm.FieldValue_v1{
+				makeFloat64FieldValue(0, 140737488355330.0), // SM Active: FP64 NOT_SUPPORTED sentinel
+				makeFloat64FieldValue(1, 0.5),               // Tensor Core: bad status
+			},
+			expectedMetric: gputypes.GPUMetric{},
+			expectedSkipped: []string{
+				"DCGM_FI_PROF_SM_ACTIVE",
+				"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",
+			},
+		},
+		{
+			name: "negative ratio is invalid and skipped",
+			values: []dcgm.FieldValue_v1{
+				makeFloat64FieldValue(0, -1.0), // SM Active: negative = invalid
+				makeFloat64FieldValue(0, 0.25), // Tensor Core: 25%
+			},
+			expectedMetric: gputypes.GPUMetric{
+				TensorCoreUtilization: ptrFloat64(25.0),
+			},
+			expectedSkipped: []string{
+				"DCGM_FI_PROF_SM_ACTIVE",
+			},
+		},
+		{
+			name:           "empty values slice",
+			values:         []dcgm.FieldValue_v1{},
+			expectedMetric: gputypes.GPUMetric{},
+		},
+		{
+			name: "partial values slice",
+			values: []dcgm.FieldValue_v1{
+				makeFloat64FieldValue(0, 0.9), // SM Active: 90% (Tensor Core absent)
+			},
+			expectedMetric: gputypes.GPUMetric{
+				SMActive: ptrFloat64(90.0),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var metric gputypes.GPUMetric
+			skipped := extractProfMetricsFromFieldValues(&metric, tc.values)
+
+			assert.Equal(t, tc.expectedMetric.SMActive, metric.SMActive)
+			assert.Equal(t, tc.expectedMetric.TensorCoreUtilization, metric.TensorCoreUtilization)
+
+			if tc.expectedSkipped == nil {
+				assert.Empty(t, skipped)
+			} else {
+				assert.Equal(t, tc.expectedSkipped, skipped)
+			}
+		})
+	}
+}
+
 func makeStringFieldValue(status int, val string) dcgm.FieldValue_v1 {
 	fv := dcgm.FieldValue_v1{Status: status}
 	copy(fv.Value[:], val)

@@ -22,14 +22,16 @@ const (
 // GPUMetric holds per-device GPU telemetry. This struct is used by both
 // dcgm-init (for collection) and the agent (for TACS conversion).
 type GPUMetric struct {
-	GPUUUID            string   `json:"gpu_uuid"`
-	GPUUtilization     *float64 `json:"gpu_utilization_percent,omitempty"`
-	MemoryUtilization  *float64 `json:"memory_utilization_percent,omitempty"`
-	MemoryTotal        *uint64  `json:"memory_total_bytes,omitempty"`
-	MemoryUsed         *uint64  `json:"memory_used_bytes,omitempty"`
-	PowerDraw          *float64 `json:"power_draw_watts,omitempty"`
-	Temperature        *float64 `json:"temperature_celsius,omitempty"`
-	RestartAppXidCount int64    `json:"restart_app_xid_count"`
+	GPUUUID               string   `json:"gpu_uuid"`
+	GPUUtilization        *float64 `json:"gpu_utilization_percent,omitempty"`
+	MemoryUtilization     *float64 `json:"memory_utilization_percent,omitempty"`
+	MemoryTotal           *uint64  `json:"memory_total_bytes,omitempty"`
+	MemoryUsed            *uint64  `json:"memory_used_bytes,omitempty"`
+	PowerDraw             *float64 `json:"power_draw_watts,omitempty"`
+	Temperature           *float64 `json:"temperature_celsius,omitempty"`
+	TensorCoreUtilization *float64 `json:"tensor_core_utilization_percent,omitempty"`
+	SMActive              *float64 `json:"sm_active_percent,omitempty"`
+	RestartAppXidCount    int64    `json:"restart_app_xid_count"`
 }
 
 // GPUMetricsFileData is the JSON structure dcgm-init writes to the shared
