@@ -104,6 +104,37 @@ const (
 	fieldIdxTemp
 )
 
+// profFields defines the DCGM profiling fields for GPU metrics collection.
+// These are DCGM_FI_PROF_* fields (SM activity, Tensor Core activity) that report
+// pipe utilization as a ratio in [0.0, 1.0]. They are watched in their own field
+// group, separate from the basic device gauges in metricsFields, because profiling
+// fields may be unsupported on some GPUs/drivers (DCGM_ST_PROFILING_NOT_SUPPORTED)
+// and can conflict with other profiling consumers. Isolating them ensures a
+// profiling failure cannot disable collection of the basic metrics.
+//
+// IMPORTANT: The position of each entry must match its corresponding profFieldIdx*
+// constant. Reordering entries without updating the iota block will cause
+// extractProfMetricsFromFieldValues to read the wrong field at each index.
+var profFields = []metricsFieldDef{
+	{dcgm.DCGM_FI_PROF_SM_ACTIVE, "DCGM_FI_PROF_SM_ACTIVE"},                   // profFieldIdxSMActive
+	{dcgm.DCGM_FI_PROF_PIPE_TENSOR_ACTIVE, "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"}, // profFieldIdxTensorActive
+}
+
+// profFieldIDs returns the DCGM field IDs derived from profFields.
+func profFieldIDs() []dcgm.Short {
+	ids := make([]dcgm.Short, len(profFields))
+	for i, f := range profFields {
+		ids[i] = f.id
+	}
+	return ids
+}
+
+// Field index constants for profFields. Must match the order above.
+const (
+	profFieldIdxSMActive = iota
+	profFieldIdxTensorActive
+)
+
 // wellKnownXIDCodes contains XID codes that indicate serious hardware failures
 // requiring instance drain. These codes are aligned with EKSNodeMonitoringAgent.
 //
@@ -300,6 +331,16 @@ type dcgmClient struct {
 	// metricsWatchActive indicates whether the metrics field watch is active.
 	// Set to true after successful WatchFieldsWithGroupEx() during initialization.
 	metricsWatchActive bool
+
+	// profFieldGroup is a DCGM field group for profiling metrics (SM active,
+	// Tensor Core active). Created once during initialization and reused across
+	// collection ticks, mirroring metricsFieldGroup. Kept separate so a profiling
+	// setup failure does not affect the basic metrics watch.
+	profFieldGroup dcgm.FieldHandle
+
+	// profWatchActive indicates whether the profiling metrics field watch is active.
+	// Set to true after successful WatchFieldsWithGroup() during initialization.
+	profWatchActive bool
 
 	// xidFieldGroup is the DCGM field group for DCGM_FI_DEV_XID_ERRORS.
 	xidFieldGroup dcgm.FieldHandle
@@ -534,12 +575,16 @@ func (c *dcgmClient) initializeLocked(ctx context.Context) error {
 	// Set up persistent metrics field watch for basic GPU metrics.
 	c.setupMetricsWatches()
 
+	// Set up persistent profiling metrics field watch (SM active, Tensor Core active).
+	c.setupProfMetricsWatches()
+
 	// Set up persistent XID error field watch for per-GPU XID counting.
 	c.setupXidWatch()
 
 	logger.Info("DCGM client initialized successfully", logger.Fields{
 		"socketPath":         c.socketPath,
 		"metricsWatchActive": c.metricsWatchActive,
+		"profWatchActive":    c.profWatchActive,
 		"xidWatchActive":     c.xidWatchActive,
 	})
 
@@ -714,6 +759,11 @@ func (c *dcgmClient) shutdownLocked() error {
 			logger.Debug("failed to destroy metrics field group", logger.Fields{"error": err})
 		}
 	}
+	if c.profWatchActive {
+		if err := c.fieldGroupDestroyFunc(c.profFieldGroup); err != nil {
+			logger.Debug("failed to destroy profiling metrics field group", logger.Fields{"error": err})
+		}
+	}
 	if c.xidWatchActive {
 		if err := c.fieldGroupDestroyFunc(c.xidFieldGroup); err != nil {
 			logger.Debug("failed to destroy XID field group", logger.Fields{"error": err})
@@ -730,6 +780,7 @@ func (c *dcgmClient) shutdownLocked() error {
 	// Reset state.
 	c.connected = false
 	c.metricsWatchActive = false
+	c.profWatchActive = false
 	c.xidWatchActive = false
 	c.lastXidQueryTime = time.Time{}
 	c.deviceIndexToUUID = nil
@@ -746,6 +797,7 @@ func (c *dcgmClient) GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, erro
 	c.mu.RLock()
 	connected := c.connected
 	metricsWatchActive := c.metricsWatchActive
+	profWatchActive := c.profWatchActive
 	xidWatchActive := c.xidWatchActive
 	lastXidQueryTime := c.lastXidQueryTime
 	c.mu.RUnlock()
@@ -778,6 +830,26 @@ func (c *dcgmClient) GetMetrics(ctx context.Context) ([]gputypes.GPUMetric, erro
 
 			if skipped := extractMetricsFromFieldValues(&metrics[i], values); len(skipped) > 0 {
 				logger.Debug("sentinel values detected for metric fields", logger.Fields{
+					"deviceIndex":   gpu,
+					"gpuUUID":       metrics[i].GPUUUID,
+					"skippedFields": skipped,
+				})
+			}
+		}
+
+		// Query profiling metrics (SM active, Tensor Core active) via the
+		// persistent profiling field watch. Read separately from the basic
+		// metrics so an unsupported profiling field on this device does not
+		// interfere with the basic gauges collected above.
+		if profWatchActive {
+			profValues, err := dcgm.GetLatestValuesForFields(gpu, profFieldIDs())
+			if err != nil {
+				logger.Warn("failed to get latest profiling field values, skipping profiling metrics for device", logger.Fields{
+					"deviceIndex": gpu,
+					"error":       err,
+				})
+			} else if skipped := extractProfMetricsFromFieldValues(&metrics[i], profValues); len(skipped) > 0 {
+				logger.Debug("sentinel values detected for profiling metric fields", logger.Fields{
 					"deviceIndex":   gpu,
 					"gpuUUID":       metrics[i].GPUUUID,
 					"skippedFields": skipped,
@@ -877,6 +949,35 @@ func extractMetricsFromFieldValues(metric *gputypes.GPUMetric, values []dcgm.Fie
 	return skipped
 }
 
+// extractProfMetricsFromFieldValues populates the profiling fields of a GPUMetric
+// (SM active, Tensor Core active) from raw DCGM field values. The values slice must
+// correspond to profFields in the same order. DCGM reports these as FP64 ratios in
+// [0.0, 1.0]; they are scaled to a 0-100 percentage to match the other utilization
+// metrics. Returns the names of fields that were skipped due to sentinel or invalid
+// values (e.g. profiling not supported on this GPU).
+func extractProfMetricsFromFieldValues(metric *gputypes.GPUMetric, values []dcgm.FieldValue_v1) []string {
+	var skipped []string
+
+	if profFieldIdxSMActive < len(values) {
+		if isValidFloat64FieldValue(values[profFieldIdxSMActive]) {
+			v := values[profFieldIdxSMActive].Float64() * 100
+			metric.SMActive = &v
+		} else {
+			skipped = append(skipped, profFields[profFieldIdxSMActive].name)
+		}
+	}
+	if profFieldIdxTensorActive < len(values) {
+		if isValidFloat64FieldValue(values[profFieldIdxTensorActive]) {
+			v := values[profFieldIdxTensorActive].Float64() * 100
+			metric.TensorCoreUtilization = &v
+		} else {
+			skipped = append(skipped, profFields[profFieldIdxTensorActive].name)
+		}
+	}
+
+	return skipped
+}
+
 // setupMetricsWatches creates a persistent field group for GPU metrics and
 // watches them on all GPUs. Called once during initialization.
 // On each collection tick, GetMetrics() reads values via GetLatestValuesForFields()
@@ -903,6 +1004,37 @@ func (c *dcgmClient) setupMetricsWatches() {
 	c.metricsWatchActive = true
 	logger.Info("persistent metrics field watches enabled successfully", logger.Fields{
 		"fieldCount": len(metricsFields),
+	})
+}
+
+// setupProfMetricsWatches creates a persistent field group for GPU profiling metrics
+// (SM active, Tensor Core active) and watches them on all GPUs. Called once during
+// initialization, after setupMetricsWatches. Kept separate from the basic metrics
+// group because profiling fields may be unsupported on some GPUs/drivers; if setup
+// fails, profWatchActive remains false and the profiling metrics are simply omitted
+// without affecting basic metrics collection.
+func (c *dcgmClient) setupProfMetricsWatches() {
+	logger.Info("setting up persistent profiling metrics field watches")
+
+	fieldGroup, err := dcgm.FieldGroupCreate("gpu_metrics_prof", profFieldIDs())
+	if err != nil {
+		logger.Error("failed to create profiling metrics field group, profiling metrics disabled", logger.Fields{"error": err})
+		return
+	}
+
+	err = dcgm.WatchFieldsWithGroup(fieldGroup, dcgm.GroupAllGPUs())
+	if err != nil {
+		logger.Error("failed to watch profiling metrics fields, profiling metrics disabled", logger.Fields{"error": err})
+		if destroyErr := c.fieldGroupDestroyFunc(fieldGroup); destroyErr != nil {
+			logger.Debug("failed to destroy unused profiling metrics field group", logger.Fields{"error": destroyErr})
+		}
+		return
+	}
+
+	c.profFieldGroup = fieldGroup
+	c.profWatchActive = true
+	logger.Info("persistent profiling metrics field watches enabled successfully", logger.Fields{
+		"fieldCount": len(profFields),
 	})
 }
 
